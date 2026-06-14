@@ -1,0 +1,16 @@
+# Ambiente virtual
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Configuração local (calibração específica do SEU braço/câmera)
+config_seguir.json
+
+# Editores / SO
+.vscode/
+.idea/
+.DS_Store

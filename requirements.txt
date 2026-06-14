@@ -1,0 +1,10 @@
+# Visão computacional (Fases 1-5)
+opencv-python==4.13.0
+numpy==2.4.6
+
+# Controle do braço B601-dm / motores Damiao (Fase 6+)
+# O pacote de controle em si (reBotArm_control_py) NÃO é instalado por pip:
+# importamos via sys.path apontando para ~/GITHUB/reBotArm_control_py
+motorbridge>=0.1.7   # ponte serial<->CAN (MotorBridge em /dev/ttyACM0)
+pyyaml>=6.0          # lê o config/arm.yaml
+pin>=3.9.0           # pinocchio (cinemática); puxado pelo __init__ do pacote
