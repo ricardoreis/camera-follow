@@ -205,22 +205,21 @@ def calibrar_eixo(cap, detector, eixo, comp, janela=None, texto="CALIBRANDO...")
     return sinal, ppd
 
 
-def mover_suave(arm, cap, janela, destino, msg, dur):
+def mover_suave(arm, cap, janela, destino, msg, dur, segura=0.0):
     """Move o braço da posição atual até 'destino' em 'dur' segundos, com
-    aceleração e desaceleração suaves (smoothstep) - "acordar"/"dormir"."""
+    aceleração e desaceleração suaves (smoothstep) - "acordar"/"dormir".
+
+    'segura' (s): após chegar, mantém o alvo no destino por mais esse tempo,
+    com o TORQUE LIGADO, para o braço ALCANÇAR de fato a posição antes de
+    desligar (senão ele despenca o último trecho ao perder a energia)."""
     est["livre"] = False
+    est["tracking"] = False   # deixa o integral corrigir o erro estático no destino
     qt = est["q_target"]
     inicio = qt.copy()
     destino = np.asarray(destino, dtype=float)
-    t0 = time.time()
     print(f"--- {msg} ---")
-    while True:
-        frac = (time.time() - t0) / dur
-        if frac >= 1.0:
-            break
-        s = frac * frac * (3.0 - 2.0 * frac)   # smoothstep: ease-in-out
-        qt[:] = inicio + (destino - inicio) * s
-        ok = False
+
+    def _frame():
         if cap is not None:
             ret, frame = cap.read()
             if ret:
@@ -228,10 +227,21 @@ def mover_suave(arm, cap, janela, destino, msg, dur):
                             0.9, (0, 255, 255), 2, cv2.LINE_AA)
                 cv2.imshow(janela, frame)
                 cv2.waitKey(1)
-                ok = True
-        if not ok:
-            time.sleep(0.02)
+                return
+        time.sleep(0.02)
+
+    t0 = time.time()
+    while True:
+        frac = (time.time() - t0) / dur
+        if frac >= 1.0:
+            break
+        s = frac * frac * (3.0 - 2.0 * frac)   # smoothstep: ease-in-out
+        qt[:] = inicio + (destino - inicio) * s
+        _frame()
     qt[:] = destino
+    t1 = time.time()
+    while time.time() - t1 < segura:           # segura até o braço chegar de fato
+        _frame()
 
 
 def salvar_config(repouso, neutra, sinal_pan, sinal_tilt, radpx_x, radpx_y,
@@ -661,14 +671,14 @@ def main():
             k = cv2.waitKey(1) & 0xFF
             if k in (ord("q"), 27):
                 mover_suave(arm, cap, janela, est["repouso"],
-                            "RETORNANDO AO REPOUSO...", DUR_REPOUSO)
+                            "RETORNANDO AO REPOUSO...", DUR_REPOUSO, segura=2.0)
                 break
             elif k == ord("r"):
                 # Reinício COMPLETO: volta ao repouso, encerra tudo e RE-EXECUTA
                 # o script do zero (recarrega o código mais novo, reabre a janela).
                 print("--- REINICIANDO a aplicação (recarrega o código)... ---")
                 mover_suave(arm, cap, janela, est["repouso"],
-                            "REINICIANDO...", DUR_REPOUSO)
+                            "REINICIANDO...", DUR_REPOUSO, segura=2.0)
                 for fn in (arm.stop_control_loop, arm.disable, arm.disconnect):
                     try:
                         fn()

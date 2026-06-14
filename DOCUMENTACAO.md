@@ -254,12 +254,42 @@ ele acorda e segue sozinho.
 
 ## 11. Tutorial: gravar um gesto de head-tilt
 
-1. Tracking normal como gosta (ex.: ganho 0.15) → `n` (salva o "normal").
-2. Ajuste o ganho **do gesto** (ex.: `]` até 0.5); zona/limite/vida se quiser.
-3. Escolha o tipo (`h` ou `g`) e esculpa: ângulo `9/0`, velocidade `7/8`, hold `4/5`.
-4. Salve: `s` depois `1` (ou 2/3).
-5. Volte ao normal: `r`.
-6. Toque: aperte `1`. O contexto do gesto vale durante e reverte sozinho ao fim.
+Rode `08_seguir.py` e siga:
+
+1. **Defina o "normal".** Deixe o tracking do jeito que gosta (ex.: ganho `0.15`).
+   Se quiser fixar, tecle **`n`** (salva config).
+2. **Defina o contexto DO GESTO.** Ajuste o ganho que o gesto deve usar **durante a
+   execução** (ex.: **`]`** até ~`0.5`). Se quiser, mexa em zona/limite/vida/prev também.
+3. **Esculpa o movimento:**
+   - **Tipo:** **`h`** (single, alterna lado) ou **`g`** (swing, vai-e-vem).
+   - **Ângulo:** **`9`/`0`** (até 110°). *Maior = mais gracioso.*
+   - **Velocidade:** **`7`** (lento) / **`8`** (rápido).
+   - **Hold:** **`4`/`5`** (tempo "pensando").
+   - Vá apertando **`h`**/**`g`** pra **pré-visualizar** enquanto ajusta.
+4. **Salve:** tecle **`s`** → aparece *"SALVAR: tecle 1/2/3"* → tecle **`1`**. Pronto,
+   virou o **gesto 1** (guarda o tilt **+** o contexto de controle).
+5. **Volte ao normal:** tecle **`r`** (reinicia e recarrega o ganho `0.15`) — ou
+   ajuste na mão.
+6. **Toque:** aperte **`1`**. Durante o gesto o ganho vira `0.5` (vê
+   `[GESTO override]` no HUD), e ao fim **volta sozinho** ao normal. 🎯
+
+### Personalidades pra experimentar
+
+| Slot | Caráter | Receita |
+|---|---|---|
+| **1** | Curioso / alerta | single, ~50°, rápido (`8`), hold curto |
+| **2** | Intrigado / pensativo | single, ~80°, lento (`7`), hold longo (`5`) |
+| **3** | Negando / wobble | swing (`g`), ~40°, rápido |
+
+> **Dica:** salve, toque, ajuste, salve de novo no mesmo slot pra refinar. Os gestos
+> ficam em **`gestos.json`** (portátil/compartilhável!).
+
+### Como funciona por dentro (resumo)
+
+Cada preset guarda `tipo`, `amp` (ângulo), `sobe` (velocidade), `segura` (hold) e o
+**contexto de controle** (`ganho`, `zona_morta`, `limite`, `vida`, `prev`). Ao tocar,
+esse contexto vira o **valor efetivo** durante o gesto e **reverte sozinho** quando
+ele termina (sem salvar/restaurar manual — robusto a interrupções).
 
 ---
 
