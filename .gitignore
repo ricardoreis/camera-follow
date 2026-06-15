@@ -10,6 +10,9 @@ __pycache__/
 # Configuração local (calibração específica do SEU braço/câmera)
 config_seguir.json
 
+# Logs de debug (tecla 'd')
+log_*.csv
+
 # Editores / SO
 .vscode/
 .idea/

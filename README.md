@@ -97,7 +97,11 @@ tutorial). Resumo:
 | **Ajustes** | `[`/`]` ganho · `o`/`p` zona morta · `-`/`=` limite · `v`/`b` vida · `,`/`.` previsão · `x`/`y` sinais |
 | **Head-tilt** | `h` alterna · `j`/`l` fixa lado · `g` swing · `9/0` ângulo · `7/8` velocidade · `4/5` hold |
 | **Gestos** | `s`+`1/2/3` salva · `1`/`2`/`3` toca |
-| **Sistema** | `a` ajuda · `i` esconde · `r` reinicia · `ESC` sai (suave) |
+| **Autonomia** | `m` curiosidade (head-tilt sozinho) · `u` varredura (olhar ao redor) |
+| **Sistema** | `a` ajuda · `i` esconde · `d` log de debug (CSV) · `r` reinicia · `ESC` sai (suave) |
+
+O braço age sozinho: segue seu rosto, **persegue** o canto pra onde você fugiu, fica
+**curioso** (head-tilt) quando você para, e **procura** você quando some.
 
 ## 🎬 Gravar um gesto de head-tilt
 

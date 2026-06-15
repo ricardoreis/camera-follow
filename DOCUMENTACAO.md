@@ -172,11 +172,29 @@ micro-movimentos), não de **globo ocular** (rápido e preciso demais).
   por número (1/2/3). Cada preset guarda **tipo+ângulo+velocidade+hold** + um
   **contexto de controle** (ganho/zona/limite/vida/prev) que vale **durante** o gesto
   e **reverte sozinho** ao fim ("valor efetivo", sem salvar/restaurar frágil).
+- Durante um gesto o **pan/tilt CONGELA** (a câmera inclina sem perseguir o alvo,
+  que sai do lugar por causa do roll do joint6).
+
+### Autonomia (a criatura age sozinha) — máquina de estados
+
+Comportamentos independentes (toggles): **TRACKING** (`t`), **CURIOSIDADE** (`m`),
+**VARREDURA** (`u`). Estados: `seguindo` → `perseguindo` → `varrendo` → `ocioso`.
+
+- **Perseguição (parte do tracking):** quando você some, o braço calcula a **direção
+  REAL** (proporcional, NÃO o `sign()` — que causava tilt espúrio) de onde seu rosto
+  saiu e vai **reto** pra lá por alguns segundos.
+- **Curiosidade (`m`):** parado e centralizado por X s (sorteado) → head-tilt
+  **sorteado** entre os salvos, com **cooldown** (descanso) aleatório.
+- **Varredura (`u`):** se a perseguição não te acha, **olha ao redor** (1-3 ciclos),
+  desiste, fica **ocioso** (espera) e tenta de novo.
+- **Debug:** painel roxo no HUD mostra estado, timers e aleatoriedade. Tecla **`d`**
+  grava um **CSV** (posição do rosto, do alvo previsto, erro, ângulos das juntas por
+  frame) para análise — foi assim que diagnosticamos o "movimento perdido".
 
 **Ideias futuras:** faixas (min-max) → randomização pra personalidade; "humor/
-excitação" global que escala a velocidade; **gravação por braço-líder** (teleop,
-estilo LeRobot); **gatilhos** (parado X s → gesto; com mic: falar → gesto; mostrar
-objeto → gesto).
+excitação" global; **gravação por braço-líder** (teleop, LeRobot); gatilhos de
+**saudação/aproximação** (com garra + sons); **detecção de corpo/mãos** como pista
+quando a cabeça sai mas o corpo aparece.
 
 ---
 
@@ -200,8 +218,11 @@ objeto → gesto).
 | `c` | recentrar o olhar na neutra |
 | `k` | calibrar sinal + escala |
 | `n` | salvar config (pose + calibração + ajustes) |
+| `m` | curiosidade on/off (head-tilt automático quando parado) |
+| `u` | varredura on/off (olhar ao redor quando te perde) |
 | `r` | reiniciar a aplicação (recarrega o código) |
 | `i` | esconder/mostrar overlays |
+| `d` | gravar/parar log de debug (CSV) |
 | `a` | ajuda (cicla 4 páginas) |
 | `ESC`/`q` | sair (braço volta suave ao repouso) |
 | `[` / `]` | ganho − / + |
@@ -308,8 +329,9 @@ Em andamento: gravar/refinar gestos de head-tilt; polir o "feeling".
 ## 13. Próximas etapas (roadmap)
 
 **Prioridade definida com o usuário** (não pular etapas):
-1. 🐶 **Comportamento vivo** — presets de gesto ✅; faixas + "humor" (randomização);
-   busca quando perde o alvo; micro-movimento melhor (com mais juntas).
+1. 🐶 **Comportamento vivo** — presets de gesto ✅; **autonomia** (curiosidade +
+   perseguição + varredura) ✅; refino fino da perseguição (desvio vertical, pose com
+   px/deg maior); faixas + "humor" (randomização); micro-movimento melhor (mais juntas).
 2. 🏃 **Agilidade (latência)** — captura em **thread** separada, afinar suavização/
    predição. É o teto de fluidez (não é GPU).
 3. 🦾 **Movimentação completa** — usar **mais juntas** coordenadas via **cinemática

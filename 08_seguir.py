@@ -34,6 +34,7 @@ TECLAS:
 
 import json
 import os
+import random
 import sys
 import time
 
@@ -86,6 +87,18 @@ MEAS_S = 0.3              # janela de medição do rosto
 # Movimentos suaves (acordar / dormir).
 DUR_ACORDAR = 3.0          # s para subir à pose neutra
 DUR_REPOUSO = 3.5          # s para voltar ao repouso (mais lento/suave)
+
+# Comportamentos automáticos (curiosidade + busca).
+T_PERDIDO = 0.3           # s sem rosto até começar a PERSEGUIR o canto
+T_PURSUIT = 2.0           # s perseguindo o canto (reto) antes de desistir/varrer
+PESO_TILT_BUSCA = 0.5     # peso do componente vertical na perseguição (suaviza)
+PARADO_MIN, PARADO_MAX = 4.0, 7.0   # s parado/centralizado p/ disparar curiosidade
+COOLDOWN_MIN, COOLDOWN_MAX = 6.0, 12.0   # s entre reações automáticas
+VEL_PARADO_MAX = 80.0     # px/s: abaixo disso o alvo é considerado "parado"
+BUSCA_PERIODO = 6.0       # s de um ciclo completo da varredura (olhar ao redor)
+BUSCA_AMP_FRAC = 0.8      # fração do 'limite' usada na perseguição/varredura
+N_CICLOS_MIN, N_CICLOS_MAX = 1, 3   # quantas varreduras antes de desistir (sorteado)
+OCIOSO_MIN, OCIOSO_MAX = 6.0, 16.0  # s de espera (ocioso) antes de varrer de novo
 
 # Arquivo de config (pose neutra + calibração), salvo com a tecla 'n'.
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -395,9 +408,12 @@ AJUDA_PAGINAS = [
      ("f        FLUTUAR: mover o braco com a mao para reposicionar", COR_TXT),
      ("c        recentrar o olhar na pose neutra", COR_TXT),
      ("k        CALIBRAR sinal+escala (fique parado, rosto visivel)", COR_TXT),
+     ("m        CURIOSIDADE on/off (head-tilt sozinho quando parado)", COR_TXT),
+     ("u        VARREDURA on/off (olhar ao redor quando te perde)", COR_TXT),
      ("n        SALVAR config (pose neutra + calibracao + ajustes)", COR_TXT),
      ("r        REINICIAR a aplicacao (recarrega tudo do zero)", COR_TXT),
      ("i        esconder / mostrar todos os elementos da tela", COR_TXT),
+     ("d        gravar/parar LOG de debug (CSV) p/ analisar depois", COR_TXT),
      ("ESC / q  sair com o braco voltando suave ao repouso", COR_TXT)],
 
     [("AJUDA  2/4 — AJUSTES DO TRACKING        [a] proxima", COR_TIT),
@@ -427,7 +443,11 @@ AJUDA_PAGINAS = [
      ("PREVISAO: mira X ms a frente p/ compensar a latencia.", COR_TXT),
      ("CALIBRAR (k): mede sozinho o SINAL e a ESCALA (px por grau)", COR_TXT),
      ("       da sua camera+braco. Substitui qualquer 'chute'.", COR_DIM),
-     ("SINAIS: o sentido de cada eixo. x/y invertem se errado.", COR_TXT)],
+     ("SINAIS: o sentido de cada eixo. x/y invertem se errado.", COR_TXT),
+     ("TRACKING (t): segue seu rosto e, se voce some, PERSEGUE o", COR_TXT),
+     ("       canto p/ onde voce fugiu (em linha reta).", COR_DIM),
+     ("CURIOSIDADE (m): parado X s -> ele faz um head-tilt sozinho.", COR_TXT),
+     ("VARREDURA (u): se nao te acha, OLHA AO REDOR e depois espera.", COR_TXT)],
 
     [("AJUDA  4/4 — TUTORIAL: gravar um gesto    [a] fecha", COR_TIT),
      ("", COR_TXT),
@@ -444,14 +464,56 @@ AJUDA_PAGINAS = [
 ]
 
 
+def motor_pronto(arm):
+    """True se TODOS os motores responderam (status_code==1). Detecta braço sem
+    energia — a lib não levanta exceção nesse caso, só imprime falhas."""
+    try:
+        for jc in arm._joints:
+            st = arm._motor_map[jc.name].get_state()
+            if st is None or getattr(st, "status_code", None) != 1:
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def tela_sem_braco():
+    """Janela amigável quando não há comunicação com o braço."""
+    img = np.full((360, 940, 3), 25, np.uint8)
+    linhas = [
+        ("SEM COMUNICACAO COM O BRACO B601-DM", COR_ERRO, 0.95),
+        ("", COR_TXT, 0.6),
+        ("Verifique se o braco esta:", COR_TXT, 0.72),
+        ("   - LIGADO na energia", COR_TXT, 0.72),
+        ("   - CONECTADO no computador (USB / MotorBridge)", COR_TXT, 0.72),
+        ("", COR_TXT, 0.6),
+        ("Ligue/conecte e rode de novo.   (tecle algo p/ sair)", COR_DIM, 0.62),
+    ]
+    y = 56
+    for txt, cor, esc in linhas:
+        cv2.putText(img, txt, (28, y), cv2.FONT_HERSHEY_SIMPLEX, esc, cor, 2, cv2.LINE_AA)
+        y += 46
+    cv2.namedWindow("Camera Follow", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("Camera Follow", 940, 360)
+    cv2.imshow("Camera Follow", img)
+    cv2.waitKey(8000)
+    cv2.destroyAllWindows()
+
+
 def main():
     detector = DetectorFaces()
     rastreador = RastreadorAlvo(t_pred_ms=PREVISAO_MS)
-    arm = RobotArm()
-    arm.connect()
+    try:
+        arm = RobotArm()
+        arm.connect()
+        pos0 = np.asarray(arm.get_positions(request=True), dtype=float)
+    except Exception as e:
+        print("!!! Nao consegui falar com o braco:", e)
+        tela_sem_braco()
+        return
     print("--- conectado ---")
     n = arm.num_joints
-    est["q_target"] = arm.get_positions(request=True).copy()
+    est["q_target"] = pos0.copy()
     est["home"] = est["q_target"].copy()
     est["repouso"] = est["q_target"].copy()   # pose do início = repouso (comece "sentado")
 
@@ -476,6 +538,9 @@ def main():
     gesto_override = {}          # parâmetros de controle a forçar DURANTE o gesto atual
     toast = None                 # (texto, cor, t0) - aviso transitório na tela
     ajuda_pagina = 0             # 0 = sem ajuda; 1..4 = páginas
+    log_arquivo = None           # 'd' liga/desliga a gravação de um CSV de debug
+    log_path = ""
+    log_t0 = 0.0
 
     def aviso(texto, cor=COR_OK):
         nonlocal toast
@@ -489,11 +554,51 @@ def main():
     radpx_x = np.radians(FOV_H) / 1280.0
     radpx_y = np.radians(FOV_V) / 720.0
 
+    # --- Comportamentos (toggles independentes) ---
+    curiosidade_on = True           # 'm': head-tilt automático quando você fica parado
+    varredura_on = True             # 'u': olhar ao redor quando perde você por mais tempo
+    # Estado comportamental: seguindo / perseguindo (canto) / varrendo / ocioso.
+    auto_estado = "seguindo"
+    t_centrado_inicio = None        # quando começou a ficar parado/centralizado
+    t_perdido_inicio = None         # quando o rosto sumiu
+    persiga_t0 = None               # quando começou a perseguir o canto
+    cooldown_ate = 0.0              # sem reação automática até este instante
+    prox_parado = random.uniform(PARADO_MIN, PARADO_MAX)
+    ultima_reacao = None            # (slot, tipo, timestamp) da última reação
+    busca_t0 = None                 # quando começou a varredura
+    dir_saida = (1.0, 0.0)          # sinal (pan, tilt) da saída (p/ varredura/HUD)
+    busca_alvo_pan = est["home"][PAN]    # ângulo-alvo (rad) da perseguição
+    busca_alvo_tilt = est["home"][TILT]
+    ultimo_prev = None              # último ponto previsto com rosto presente
+    n_ciclos_busca = 1              # quantas varreduras nesta busca (sorteado)
+    ocioso_ate = 0.0                # fim da espera ociosa (timestamp)
+
+    def disparar_gesto(slot):
+        """Toca o gesto do slot (mesmo caminho da tecla numérica). Usado tanto
+        pelas teclas quanto pela autonomia."""
+        nonlocal gesto_tipo, head_amp, ht_sobe, ht_segura
+        nonlocal gesto_override, gesto_dir, gesto_t0, ultima_reacao
+        pr = presets[slot]
+        gesto_tipo = pr["tipo"]
+        head_amp, ht_sobe, ht_segura = pr["amp"], pr["sobe"], pr["segura"]
+        gesto_override = {key: pr[key] for key in
+                          ("ganho", "zona_morta", "limite", "vida", "prev") if key in pr}
+        gesto_dir = +1 if gesto_tipo == "swing" else -gesto_dir
+        gesto_t0 = time.time()
+        ultima_reacao = (slot, gesto_tipo, time.time())
+
     cap = None
     try:
         cap, idx = camera.abrir_camera(CAMERA_PULSO)
         print(f"--- câmera {CAMERA_PULSO} (idx {idx}) ---")
         arm.enable()
+        if not motor_pronto(arm):     # braço sem energia / sem comunicação
+            print("!!! Braco sem comunicacao (sem energia?).")
+            if cap is not None:
+                cap.release()
+                cap = None
+            tela_sem_braco()
+            return
         arm.mode_mit(kp=np.full(n, KP), kd=np.full(n, KD))
         arm.start_control_loop(controlador)
 
@@ -567,8 +672,11 @@ def main():
                 idle_pan = idle_tilt = 0.0
 
             # ---- LEI DE CONTROLE proporcional (ancorada na posição real) ----
+            # Durante um gesto (gesto_t0) o pan/tilt CONGELA: a câmera inclina
+            # (joint6) sem perseguir o alvo, que sai do lugar por causa do roll.
             erro = None
-            if tracking and not est["livre"] and ponto_cru is not None and prev is not None:
+            if (tracking and not est["livre"] and ponto_cru is not None
+                    and prev is not None and gesto_t0 is None):
                 dx, dy = prev[0] - cx, prev[1] - cy
                 erro = (dx, dy)
                 # Cada eixo só se move FORA da zona morta (dentro, congela).
@@ -582,6 +690,117 @@ def main():
                     des = (pos[TILT] - idle_tilt) + sinal_tilt * kpv * dy * radpx_y
                     des = np.clip(des, home[TILT] - lim, home[TILT] + lim)
                     base_tilt += np.clip(des - base_tilt, -max_step, max_step)
+
+            # ---- COMPORTAMENTOS: perseguir o canto, curiosidade, varredura ----
+            if tracking and not est["livre"]:
+                agora = time.time()
+                # Durante um gesto a deteccao se perde (a camera inclina); nao
+                # conte isso como "sumiu" -> voce continua ai.
+                rosto = ponto_cru is not None or gesto_t0 is not None
+                if ponto_cru is not None and prev is not None:
+                    ultimo_prev = prev
+
+                # Transições de estado.
+                if rosto:
+                    if auto_estado != "seguindo":
+                        aviso("Achei voce!", COR_OK)
+                        auto_estado = "seguindo"
+                    t_perdido_inicio = None
+                else:
+                    if t_perdido_inicio is None:
+                        t_perdido_inicio = agora
+                        if ultimo_prev is not None:   # para onde você saiu
+                            ex = ultimo_prev[0] - cx
+                            ey = ultimo_prev[1] - cy
+                            dir_saida = (float(np.sign(ex)), float(np.sign(ey)))
+                            # Direção REAL (proporcional), estendida até a borda
+                            # na mesma proporção -> perseguição reta e correta
+                            # (horizontal puro se você fugiu na horizontal).
+                            denom = max(abs(ex) / max(cx, 1), abs(ey) / max(cy, 1), 1e-3)
+                            fator = min(1.0 / denom, 3.0)
+                            busca_alvo_pan = float(np.clip(
+                                base_pan + sinal_pan * ex * fator * radpx_x,
+                                home[PAN] - lim, home[PAN] + lim))
+                            busca_alvo_tilt = float(np.clip(
+                                base_tilt + sinal_tilt * ey * fator * radpx_y * PESO_TILT_BUSCA,
+                                home[TILT] - lim, home[TILT] + lim))
+                    if (auto_estado == "seguindo" and ultimo_prev is not None
+                            and agora - t_perdido_inicio > T_PERDIDO):
+                        auto_estado = "perseguindo"
+                        persiga_t0 = agora
+
+                # CURIOSIDADE (só seguindo, rosto presente): parado -> head-tilt.
+                if auto_estado == "seguindo" and curiosidade_on:
+                    vlen = float(np.hypot(*rastreador.velocidade()))
+                    centrado = (erro is not None and abs(erro[0]) < dzv
+                                and abs(erro[1]) < dzv)
+                    if centrado and vlen < VEL_PARADO_MAX:
+                        if t_centrado_inicio is None:
+                            t_centrado_inicio = agora
+                    else:
+                        t_centrado_inicio = None
+                    if (presets and gesto_t0 is None and agora >= cooldown_ate
+                            and t_centrado_inicio is not None
+                            and agora - t_centrado_inicio >= prox_parado):
+                        slot = random.choice(list(presets.keys()))
+                        disparar_gesto(slot)
+                        aviso(f"Curioso! gesto {slot}", COR_GESTO)
+                        cooldown_ate = agora + random.uniform(COOLDOWN_MIN, COOLDOWN_MAX)
+                        prox_parado = random.uniform(PARADO_MIN, PARADO_MAX)
+                        t_centrado_inicio = None
+                else:
+                    t_centrado_inicio = None
+
+                # MOVIMENTO de busca (perseguir/varrer/ocioso). Não mexe durante
+                # um gesto (a câmera inclina sem perseguir o alvo).
+                if gesto_t0 is None and auto_estado != "seguindo":
+                    amp = np.radians(limite_deg * BUSCA_AMP_FRAC)
+                    sp = (sinal_pan * dir_saida[0]) or 1.0
+                    alvo_pan, alvo_tilt = home[PAN], home[TILT]
+                    if auto_estado == "perseguindo":
+                        # Vai RETO para onde você sumiu (direção real, proporcional).
+                        alvo_pan, alvo_tilt = busca_alvo_pan, busca_alvo_tilt
+                        if agora - persiga_t0 > T_PURSUIT:
+                            if varredura_on:
+                                auto_estado = "varrendo"
+                                busca_t0 = agora
+                                n_ciclos_busca = random.randint(N_CICLOS_MIN, N_CICLOS_MAX)
+                                aviso(f"Procurando ao redor... ({n_ciclos_busca}x)", COR_AVISO)
+                            else:
+                                auto_estado = "ocioso"
+                                ocioso_ate = agora + random.uniform(OCIOSO_MIN, OCIOSO_MAX)
+                    elif auto_estado == "varrendo":
+                        ts = agora - busca_t0
+                        if int(ts / BUSCA_PERIODO) >= n_ciclos_busca:
+                            auto_estado = "ocioso"
+                            ocioso_ate = agora + random.uniform(OCIOSO_MIN, OCIOSO_MAX)
+                            aviso("Nao achei... vou esperar", COR_DIM)
+                        else:
+                            fase = 2 * np.pi * ts / BUSCA_PERIODO
+                            alvo_pan = home[PAN] + amp * sp * np.cos(fase)
+                            alvo_tilt = home[TILT] + amp * 0.3 * np.sin(fase * 0.5)
+                    elif auto_estado == "ocioso":
+                        # Volta à neutra e espera; se varredura ON, volta a varrer.
+                        if varredura_on and agora >= ocioso_ate:
+                            auto_estado = "varrendo"
+                            busca_t0 = agora
+                            n_ciclos_busca = random.randint(N_CICLOS_MIN, N_CICLOS_MAX)
+                            aviso(f"Vou olhar de novo... ({n_ciclos_busca}x)", COR_AVISO)
+                    base_pan += np.clip(alvo_pan - base_pan, -max_step, max_step)
+                    base_tilt += np.clip(alvo_tilt - base_tilt, -max_step, max_step)
+                    base_pan = np.clip(base_pan, home[PAN] - lim, home[PAN] + lim)
+                    base_tilt = np.clip(base_tilt, home[TILT] - lim, home[TILT] + lim)
+
+            # ---- LOG de debug (tecla 'd'): uma linha por frame ----
+            if log_arquivo is not None:
+                fx, fy = ponto_cru if ponto_cru else ("", "")
+                px, py = prev if prev else ("", "")
+                ex_, ey_ = erro if erro else ("", "")
+                log_arquivo.write(
+                    f"{time.time()-log_t0:.3f},{auto_estado},{fx},{fy},{px},{py},"
+                    f"{ex_},{ey_},{np.degrees(base_pan):.2f},{np.degrees(base_tilt):.2f},"
+                    f"{np.degrees(pos[PAN]):.2f},{np.degrees(pos[TILT]):.2f},"
+                    f"{np.degrees(pos[HEAD_TILT_JOINT]):.2f}\n")
 
             # Alvo final = intenção (base) + vida (overlay). Só compõe quando
             # travado; no float, quem manda no qt é o controlador (segue a mão).
@@ -643,6 +862,33 @@ def main():
                             (f"{s}:{presets[s]['tipo'][:4]}" if s in presets else f"{s}:-")
                             for s in ("1", "2", "3"))
                         gestos_linha = (f"GESTOS  {slots}     s=salvar  1/2/3=tocar", COR_GESTO)
+                    # Debug dos COMPORTAMENTOS (o "cérebro"): toggles + estado.
+                    ag = time.time()
+                    COR_AUTO = (200, 130, 255)
+                    seta = "<--" if dir_saida[0] < 0 else ("-->" if dir_saida[0] > 0 else "|")
+                    auto_l = ("COMPORTAMENTOS  "
+                              f"track(t):{'ON ' if tracking else 'off'}  "
+                              f"curioso(m):{'ON ' if curiosidade_on else 'off'}  "
+                              f"varredura(u):{'ON ' if varredura_on else 'off'}", COR_AUTO)
+                    if auto_estado == "perseguindo":
+                        est_txt = f"PERSEGUINDO o canto {seta}"
+                    elif auto_estado == "varrendo":
+                        cic = int((ag - busca_t0) / BUSCA_PERIODO) + 1 if busca_t0 else 1
+                        est_txt = f"VARRENDO {seta}  ciclo {cic}/{n_ciclos_busca}"
+                    elif auto_estado == "ocioso":
+                        esp = max(0.0, ocioso_ate - ag)
+                        est_txt = (f"OCIOSO (volta a varrer em {esp:.0f}s)" if varredura_on
+                                   else "OCIOSO (esperando voce voltar)")
+                    else:
+                        pc = (ag - t_centrado_inicio) if t_centrado_inicio else 0.0
+                        cd = max(0.0, cooldown_ate - ag)
+                        est_txt = f"SEGUINDO   parado {pc:.1f}/{prox_parado:.1f}s   cooldown {cd:.0f}s"
+                    auto_l2 = (f"estado: {est_txt}", COR_AUTO)
+                    if ultima_reacao:
+                        _sl, _tp, _tr = ultima_reacao
+                        auto_l3 = (f"ultima reacao: gesto {_sl} ({_tp}) ha {ag - _tr:.0f}s", COR_DIM)
+                    else:
+                        auto_l3 = ("ultima reacao: --", COR_DIM)
                     linhas = [
                         ("== CAMERA FOLLOW ==", COR_TIT),
                         modo,
@@ -650,7 +896,9 @@ def main():
                         (f"erro: {('%+d,%+d px' % erro) if erro else '--'}"
                          + ("   [GESTO override]" if ov else ""), COR_TXT),
                         (f"ganho[/]={kpv:.2f}  zona(o/p)={dzv}px  limite(-/=)={limv:.0f}deg  "
-                         f"vida(v/b)={vidav:.1f}  prev(,/.)={prevv:.0f}ms", COR_VAL),
+                         f"vida(v/b)={vidav:.1f}  prev(,/.)={prevv:.0f}ms"
+                         + ("   <<< OVERRIDE DO GESTO ATIVO" if ov else ""),
+                         COR_TIT if ov else COR_VAL),
                         (f"sinais x/y: pan={sinal_pan:+d} tilt={sinal_tilt:+d}   "
                          f"escala: {1/radpx_x*np.radians(1):.1f}/{1/radpx_y*np.radians(1):.1f} px/deg",
                          COR_VAL),
@@ -659,7 +907,12 @@ def main():
                          COR_GESTO),
                         ("h inclina   j/l fixa lado   g swing", COR_GESTO),
                         gestos_linha,
-                        ("[a] AJUDA e legendas completas      [i] esconde tudo", COR_DIM),
+                        auto_l,
+                        auto_l2,
+                        auto_l3,
+                        (("[ GRAVANDO LOG ]   " if log_arquivo else "")
+                         + "[a] ajuda   [i] esconde   [d] log de debug",
+                         COR_OK if log_arquivo else COR_DIM),
                     ]
                     painel(frame, 8, 8, linhas, escala=0.5)
 
@@ -775,6 +1028,28 @@ def main():
                     gesto_override = {}
             elif k == ord("i"):              # esconde/mostra todos os overlays
                 mostra_overlay = not mostra_overlay
+            elif k == ord("m"):              # curiosidade (head-tilt automático)
+                curiosidade_on = not curiosidade_on
+                t_centrado_inicio = None
+                aviso("Curiosidade ON" if curiosidade_on else "Curiosidade OFF",
+                      COR_OK if curiosidade_on else COR_DIM)
+            elif k == ord("u"):              # varredura (olhar ao redor ao perder)
+                varredura_on = not varredura_on
+                aviso("Varredura ON" if varredura_on else "Varredura OFF",
+                      COR_OK if varredura_on else COR_DIM)
+            elif k == ord("d"):              # liga/desliga gravação de log (CSV)
+                if log_arquivo is None:
+                    nome = "log_" + time.strftime("%Y%m%d_%H%M%S") + ".csv"
+                    log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), nome)
+                    log_arquivo = open(log_path, "w")
+                    log_arquivo.write("t,estado,face_x,face_y,prev_x,prev_y,err_x,err_y,"
+                                      "base_pan,base_tilt,pan_real,tilt_real,j6_real\n")
+                    log_t0 = time.time()
+                    aviso(f"Gravando log: {nome}", COR_OK)
+                else:
+                    log_arquivo.close()
+                    log_arquivo = None
+                    aviso(f"Log salvo: {os.path.basename(log_path)}", COR_OK)
             elif k == ord("s"):              # entra no modo "salvar gesto"
                 salvando = True
                 aviso("SALVAR gesto: tecle 1, 2 ou 3", COR_AVISO)
@@ -790,15 +1065,7 @@ def main():
                     salvando = False
                     aviso(f"Gesto {slot} salvo ({gesto_tipo})", COR_OK)
                 elif slot in presets and not est["livre"]:   # toca o gesto do slot
-                    pr = presets[slot]
-                    gesto_tipo = pr["tipo"]
-                    head_amp, ht_sobe, ht_segura = pr["amp"], pr["sobe"], pr["segura"]
-                    # overrides de controle do gesto (só as chaves presentes).
-                    gesto_override = {key: pr[key] for key in
-                                      ("ganho", "zona_morta", "limite", "vida", "prev")
-                                      if key in pr}
-                    gesto_dir = +1 if gesto_tipo == "swing" else -gesto_dir
-                    gesto_t0 = time.time()
+                    disparar_gesto(slot)
                     aviso(f"Tocando gesto {slot} ({gesto_tipo})", COR_GESTO)
                 elif slot not in presets:
                     aviso(f"Slot {slot} vazio - use s + {slot} para salvar", COR_AVISO)
@@ -817,6 +1084,8 @@ def main():
                 ht_segura = max(0.0, ht_segura - 0.1)
 
     finally:
+        if log_arquivo is not None:
+            log_arquivo.close()
         print("\n--- encerrando: desligando torque (APOIE o braço) ---")
         for fn in (arm.stop_control_loop, arm.disable, arm.disconnect):
             try:
