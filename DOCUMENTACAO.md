@@ -316,31 +316,67 @@ ele termina (sem salvar/restaurar manual — robusto a interrupções).
 
 ## 12. Estado atual (status)
 
-✅ **Objetivo central atingido:** a garra segue o rosto, em tempo real, suave, tudo
-local. Funcionam: detecção, suavização, predição, controle em malha fechada,
-auto-calibração, acordar/dormir suave, ajustes ao vivo, **head-tilt + presets de
-gesto com contexto de controle**, e uma **interface visual completa** (HUD, toasts,
-ajuda).
+✅ **Objetivo central atingido e superado.** A garra segue o rosto em tempo real,
+suave, tudo local. **Funcionando hoje:**
+- Detecção (YuNet), suavização (One Euro), predição (Kalman), controle em malha
+  fechada (visual servoing proporcional, anti-windup, zona morta que congela).
+- **Auto-calibração** (sinal + escala px/grau); **acordar/dormir** suave; **pouso
+  suave** ao sentar (segura o torque até chegar); **reinício** completo (`r`).
+- **Head-tilt** (single/swing) + **presets de gesto** (`gestos.json`) com contexto de
+  controle; durante o gesto o pan/tilt **congela** (não persegue o alvo deslocado).
+- **Autonomia:** persegue (linha reta, direção proporcional) o canto pra onde você
+  fugiu, fica **curioso** (head-tilt sozinho), **procura** (varredura) e fica
+  **ocioso**. Toggles `t`/`m`/`u`. Debug roxo no HUD + **log CSV** (tecla `d`).
+- **Interface completa:** HUD colorido, toasts, ajuda em 4 páginas, mensagem amigável
+  quando o braço está sem energia.
 
-Em andamento: gravar/refinar gestos de head-tilt; polir o "feeling".
+**Obstáculos já superados (aprendizados):** windup/efeito elástico; amortecimento mal
+feito (velocidade amostrada na taxa lenta); saturação do rate-limiter; integral da
+gravidade sem `dt` (ciclo-limite); tremor de repouso (congelar na zona morta);
+head-tilt enlouquecendo o tracking (roll perde a face → resolvido congelando pan/tilt
+no gesto); perseguição com tilt espúrio (era o `sign()` → trocado por direção
+proporcional). Ver seção 6.
+
+**Limitação conhecida (motiva o próximo passo):** com só 2 juntas do punho e escala
+~2,5 px/deg, o alcance angular é pequeno (±limite cobre ~200px de tela). Na
+perseguição a câmera vai na direção certa **mas não alcança** quem foge pra bem longe.
 
 ---
 
 ## 13. Próximas etapas (roadmap)
 
-**Prioridade definida com o usuário** (não pular etapas):
-1. 🐶 **Comportamento vivo** — presets de gesto ✅; **autonomia** (curiosidade +
-   perseguição + varredura) ✅; refino fino da perseguição (desvio vertical, pose com
-   px/deg maior); faixas + "humor" (randomização); micro-movimento melhor (mais juntas).
-2. 🏃 **Agilidade (latência)** — captura em **thread** separada, afinar suavização/
-   predição. É o teto de fluidez (não é GPU).
-3. 🦾 **Movimentação completa** — usar **mais juntas** coordenadas via **cinemática
-   inversa** (Pinocchio): controlar a **pose do end-effector** (posição + orientação)
-   em vez de juntas isoladas. Inspiração: projeto UR_Facetracking (UR5 + RTDE + IK).
+### ➡️ PRÓXIMO PASSO (decidido): 🦾 Braço todo via Cinemática Inversa (IK)
+
+Controlar a **pose do end-effector** (posição + orientação da câmera) com o **braço
+inteiro** via IK, em vez de só 2 juntas do punho. **Por que é o próximo (cura a
+limitação raiz):**
+- **Alcance:** o braço varre um workspace muito maior → a perseguição/busca
+  **realmente alcança** a pessoa (resolve a limitação acima).
+- **Altura dos olhos:** o braço se reposiciona pra manter a câmera **na altura do
+  rosto**, encarando de frente — mais natural.
+- **Torna a detecção de corpo menos necessária** (seria um "remendo" pro alcance).
+
+**De-risca bastante:** o repo do braço **já tem IK pronto e testado** —
+`example/5_fk_test.py`, `6_ik_test.py`, `7_arm_ik_control.py`, `8_arm_traj_control.py`
++ Pinocchio + os controladores em `reBotArm_control_py/controllers/`. O plano é
+**integrar nosso rastreamento ao IK existente**, não construir do zero.
+
+**A planejar (próxima sessão):** estudar os exemplos 5–8 e a cinemática; definir como
+mapear *erro do rosto (px) → pose-alvo do end-effector* (apontar + manter altura);
+segurança/limites do workspace; fatiar em passos seguros (ler → mover pouco →
+integrar), como fizemos com o controle 2-juntas. Inspiração conceitual:
+UR_Facetracking (UR5 + RTDE + IK, controla pose do end-effector).
+
+### Depois do IK
+1. 🧍 **Detecção de corpo/pessoa** — só se ainda fizer falta após o IK (pista quando a
+   cabeça sai mas o corpo aparece). **Mãos/objetos** → interação (futuro).
+2. 🎭 **Personalidade / "humor" + ÁUDIO** — faixas (randomização) + sons de reação
+   junto dos movimentos. (Adiado pelo usuário pra quando entrar áudio.)
+3. 🏃 **Agilidade (captura em thread)** — menos latência. Pouco relevante pro
+   comportamento de "cabeça" (não é globo ocular); fica pra depois.
 4. 🎬 **Gravação por braço-líder** (teleop) pra gestos orgânicos multi-junta.
-5. 🔔 **Gatilhos** — parado X s → gesto; futuramente microfone, objetos.
-6. 🌐 **Interface no navegador** (futuro) — ver vídeo, botões, comandos no browser.
-7. 📦 **Comunidade** — modo simulação (sem braço), vídeo/GIF no README.
+5. 🔔 **Gatilhos** de saudação/aproximação (com garra + sons).
+6. 🌐 **Interface no navegador**; 📦 **modo simulação** (sem braço) pra comunidade.
 
 ---
 
