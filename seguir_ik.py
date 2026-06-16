@@ -1,39 +1,21 @@
 #!/usr/bin/env python3
-"""10_seguir_ik.py — ETAPA 1: o braço TODO via IK ("pescoço fixo").
+"""seguir_ik.py — braço TODO via IK ("pescoço fixo"), versão MODULAR.
 
-Diferença para o 08: lá o olhar usa só 2 juntas do punho. Aqui o olhar vira uma
-ORIENTAÇÃO-alvo da câmera e a CINEMÁTICA INVERSA (IK) distribui o movimento pelas 6
-juntas — a joint1 (base) sozinha dá ±160° de pan. Modelo "pescoço fixo" (pivô/órbita):
-a câmera orbita um ponto fixo (o "pescoço"), sempre mirando pra fora.
+Mesma funcionalidade do 10_seguir_ik.py, mas separada em módulos (refactor
+lado-a-lado; o 10 segue intacto como referência até esta versão ser validada):
 
-  R_alvo = Rz(pan)·Ry(tilt)·R0                       (gira a mira)
-  p_alvo = c + r·(Rz(pan)·Ry(tilt)·eixo_óptico)       (orbita o pivô c, raio r)
+    mira_ik.py         modelo Pinocchio + IK (geometria, resolver_ik, sinal_altura)
+    controle_braco.py  loop MIT (gravidade) + estado `est` + motores
+    ui_hud.py          cores, painel, toast, tela sem braço
+    diario.py          log JSONL + Tee do terminal
+    seguir_ik.py       (este) orquestração: laço principal + teclas + servo/altura
 
-Arquitetura (ver DOCUMENTACAO seção 13):
-  - SEMPRE em modo MIT + compensação de gravidade (igual ao 08). NUNCA troca de modo
-    (a troca POS_VEL↔MIT é bloqueante ~0,5s na lib e fazia o braço despencar no 'f' —
-    validado no lab_modo.py). Um único loop de 500 Hz roda do início ao fim.
-  - FASE POSICIONAR (livre=True): você flutua o braço com a mão até "encarando" e
-    trava com ESPACO (captura a HOME, deriva a geometria).
-  - FASE SEGUIR (livre=False): a cada frame o servo visual produz (pan, tilt) → IK
-    (warm-start) → q_target das 6 juntas; o loop MIT segura/segue esse alvo.
+Arquitetura: SEMPRE MIT (nunca troca de modo). PAN pela base, TILT pelo punho,
+ALTURA acompanha sua altura (sobe/desce devagar). Ver DOCUMENTACAO seção 13.
 
-SEGURANÇA (Etapa 1): tracking começa OFF ('t' liga); envelope pequeno (±LIM, ajustável);
-se a IK não convergir, SEGURA a última pose; sinais ajustáveis (x/y) — com o envelope
-pequeno, sinal errado só vai até o limite e para (sem disparada); ESC volta suave ao
-repouso. COMECE com o braço sentado (a pose inicial vira o repouso).
-
-Ainda NÃO tem (vem na Etapa 2): gestos/head-tilt, autonomia, auto-calibração, log CSV.
-
-TECLAS:
-  ESPACO  trava a HOME e entra no modo SEGUIR (POS_VEL + IK)
-  f       volta a FLUTUAR (re-posicionar com a mão)
-  t       liga/desliga o tracking
-  x / y   inverte o sinal de pan / tilt
-  [ / ]   ganho - / +        - / =  envelope (limite) - / +
-  , / .   previsão (ms) - / +     c  recentra o olhar na home
-  i       esconde/mostra overlays
-  ESC / q sair (braço volta suave ao repouso)
+TECLAS: ESPACO trava a home · k calibra · t segue · f flutua · z marca sentado ·
+n salva · h altura on/off · v/b alcance de altura · o/p zona · -/= envelope ·
+[/] ganho · ,/. previsão · x/y sinais · c recentra · i esconde · ESC sai.
 """
 
 import json
@@ -47,15 +29,17 @@ import cv2
 ARM_REPO = os.environ.get("REBOT_ARM_REPO",
                           os.path.expanduser("~/GITHUB/reBotArm_control_py"))
 sys.path.insert(0, ARM_REPO)
-import pinocchio as pin  # noqa: E402
 from reBotArm_control_py.actuator import RobotArm  # noqa: E402
-from reBotArm_control_py.dynamics import compute_generalized_gravity  # noqa: E402
-from reBotArm_control_py.kinematics import (  # noqa: E402
-    load_robot_model, compute_fk, get_end_effector_frame_id,
+
+from mira_ik import _LO, _HI, geometria, resolver_ik, sinal_altura_de  # noqa: E402
+from controle_braco import (  # noqa: E402
+    est, controlador, motor_pronto, status_motores, KP, KD,
 )
-from reBotArm_control_py.kinematics.inverse_kinematics import (  # noqa: E402
-    solve_ik, pos_rot_to_se3, IKParams,
+from ui_hud import (  # noqa: E402
+    COR_TXT, COR_TIT, COR_OK, COR_AVISO, COR_ERRO, COR_VAL, COR_DIM, TOAST_DUR,
+    painel, desenha_toast, tela_sem_braco,
 )
+from diario import Diario, Tee  # noqa: E402
 
 import camera  # noqa: E402
 from detector import DetectorFaces  # noqa: E402
@@ -63,39 +47,18 @@ from rastreador import RastreadorAlvo  # noqa: E402
 
 CAMERA_PULSO = "C920"
 
-# Ganhos do hold MIT. FLUTUAR usa kp MOLE (pra mover com a mão). SEGURAR/SEGUIR usa
-# kp FIRME — os ganhos de fábrica do MIT (juntas grandes ~120, punho ~18), senão as
-# juntas que carregam o peso cedem sob gravidade e o tilt fica "elástico" (bounce).
-KP, KD, KI = 8.0, 2.0, 3.0          # MOLE (flutuar)
-VEL_THR, W_THR = 0.04, 0.08
-
 # Servo visual.
 KP_SERVO = 0.08            # ganho proporcional (manso; ajuste fino com [ / ])
 DEADZONE_PX = 25           # raio central onde NÃO se mexe (mata o tremor parado); o/p ajusta
-MAX_STEP_DEG = 1.2         # passo máx de mira/frame (pan agora é 1:1 com joint1 → pode subir)
-LIMITE_DEG = 20.0          # envelope pequeno (suavidade primeiro; abre com '=' se quiser)
+MAX_STEP_DEG = 1.2         # passo máx de mira/frame
+LIMITE_DEG = 20.0          # envelope do PAN (abre com '=' se quiser)
 PREVISAO_MS = 60.0
 FOV_H, FOV_V = 70.0, 43.0  # C920: com IK o olhar é a rotação ÓPTICA real → FOV ≈ correto
 
-# Qual coluna de R0 (eixo do end_link no mundo, na home) é o eixo óptico da câmera.
-EIXO_OPTICO_COL = 0        # chute = X; confirma-se observando se a órbita faz sentido
-# Eixo do CORPO (coluna de R0) usado para o TILT (pitch do punho). body-Y é suave para
-# a IK nesta montagem (validado em simulação); o pan vem da base (joint1), não daqui.
-TILT_BODY_COL = 1          # 1 = eixo Y do end_link
-
-# IK em tempo real: warm-start + alvo perto → poucas iterações (ver 09_ik_lab.py).
-IK_RT = IKParams(max_iter=200, tolerance=1e-3, step_size=0.5, damping=0.01)
-
-# Segurança / suavidade (lições dos testes):
-#  - A mira anda devagar (MAX_STEP_DEG) e o hold MIT (kp/kd) limita a velocidade.
-#  - Se a IK "virar" (salto grande = singularidade), DESFAZEMOS o passo da mira
-#    (em vez de congelar), então nunca há disparada com a câmera morta.
 IK_FLIP_DEG = 15.0          # salto de junta acima disso = virada → desfaz a mira
 MARGEM_LIMITE_DEG = 4.0     # nunca comandar a junta encostada no batente
 
-# Acompanhamento de ALTURA (Etapa 3 parcial — só vertical): se a inclinação (tilt) se
-# MANTÉM, o braço sobe/desce devagar pra re-nivelar o olhar (altura dos olhos). É uma
-# cascata: tilt centraliza rápido; altura "desfaz" o tilt sustentado, devagar.
+# Acompanhamento de ALTURA (só vertical): se o tilt se MANTÉM, sobe/desce devagar.
 ALTURA_GANHO = 0.15         # m/s por rad de tilt sustentado (LENTO, sutil)
 ALTURA_ZONA_DEG = 4.0       # só mexe a altura se |tilt| passar disso (evita creep)
 ALTURA_MAX_DEFAULT = 0.12   # alcance vertical inicial (m, ± deste valor); ajustável c/ v/b
@@ -103,74 +66,18 @@ LIMITE_TILT_DEG = 30.0      # tilt modesto (a ALTURA cobre o vertical) → evita
 FALHAS_MAX = 8              # IK falhando + que isso seguidas = PRESO → recua p/ destravar
 
 # Auto-calibração (tecla 'k'): cutuca a MIRA ±DELTA e mede o deslocamento do rosto.
-DELTA_CAL_DEG = 8.0         # quanto cutuca a mira ao calibrar (malha aberta)
-CAL_SETTLE_S = 0.8         # espera o braço chegar à mira pedida
-CAL_MEAS_S = 0.4           # janela de medição do rosto
+DELTA_CAL_DEG = 8.0
+CAL_SETTLE_S = 0.8
+CAL_MEAS_S = 0.4
 
 JANELA_W, JANELA_H = 1600, 900
 DUR_REPOUSO = 3.5
-DUR_ACORDAR = 3.0          # s da rampa suave (POS_VEL) até a home ao acordar
+DUR_ACORDAR = 3.0
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs_ik")
-# Config (home + repouso + calibração + ajustes), salva com 'n'. Específica do
-# SEU braço/câmera → fica no .gitignore.
+# Config (home + repouso + calibração + ajustes), salva com 'n' — gitignored.
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "config_seguir_ik.json")
 
-_model = load_robot_model()
-_data = _model.createData()
-_ee_id = get_end_effector_frame_id(_model)
-# Limites de junta (rad), com infinitos saneados — usados para o clamp com margem.
-_LO = np.array([x if np.isfinite(x) else -np.pi for x in _model.lowerPositionLimit])
-_HI = np.array([x if np.isfinite(x) else np.pi for x in _model.upperPositionLimit])
-
-# Estado partilhado com o loop de controle de 500 Hz.
-#  livre    = True: segue a mão (flutuar) | False: segura firme o q_target
-#  tracking = True durante o rastreamento → ZERA o integral (o laço visual é o
-#             integrador; evita windup/atraso), igual ao 08.
-est = {"q_target": None, "home": None, "repouso": None,
-       "livre": True, "integral": None, "tracking": False,
-       "kp_hold": None, "kd_hold": None}   # ganhos FIRMES (preenchidos após conectar)
-
-
-# ───────────────────────── loop de controle único (500 Hz) ────────────────────
-# SEMPRE em MIT (como o 08). NUNCA troca de modo — era a troca POS_VEL↔MIT (que é
-# bloqueante ~0,5s na lib) que deixava os motores sem comando e fazia o braço
-# DESPENCAR no 'f' (e dava o giro no acordar). Validado no lab_modo.py.
-
-def controlador(arm, dt):
-    """Hold por gravidade (MIT). Se 'livre', segue a mão; se 'tracking', zera o
-    integral (o laço visual da IK é o integrador). Igual em espírito ao 07/08."""
-    if dt <= 0:
-        dt = 0.002
-    q = arm.get_positions()
-    qd = arm.get_velocities()
-    tau_g = compute_generalized_gravity(q=q)
-    if est["integral"] is None:
-        est["integral"] = np.zeros_like(q)
-    integ = est["integral"]
-    qt = est["q_target"]
-    if est["tracking"]:
-        integ[:] = 0.0          # laço visual é o integrador → sem windup
-    else:
-        integ += (qt - q) * KI * dt
-        np.clip(integ, -0.5, 0.5, out=integ)
-        if est["livre"]:        # detecta a mão movendo o braço → acompanha
-            pin.computeJointJacobians(_model, _data, q)
-            pin.updateFramePlacements(_model, _data)
-            J = pin.getFrameJacobian(_model, _data, _ee_id, pin.ReferenceFrame.WORLD)
-            v = J @ qd
-            if np.linalg.norm(v[:3]) > VEL_THR or np.linalg.norm(v[3:]) > W_THR:
-                qt[:] = q
-                integ *= 0.9
-    n = arm.num_joints
-    if est["livre"]:                       # flutuar com a mão → mole
-        kp_arr, kd_arr = np.full(n, KP), np.full(n, KD)
-    else:                                  # segurar / seguir → firme (não cede c/ gravidade)
-        kp_arr, kd_arr = est["kp_hold"], est["kd_hold"]
-    arm.mit(pos=qt, vel=np.zeros(n), kp=kp_arr, kd=kd_arr, tau=tau_g + integ)
-
-
-# ───────────────────────────── geometria / IK ─────────────────────────────────
 
 def salvar_config_ik(repouso, home, sinal_pan, sinal_tilt, radpx_x, radpx_y,
                      kp_servo, deadzone_px, limite_deg, previsao_ms):
@@ -190,194 +97,6 @@ def carregar_config_ik():
     with open(CONFIG_PATH) as f:
         return json.load(f)
 
-
-def geometria(q_home):
-    """Deriva (p0, R0, pivô c, raio r, eixo óptico) da pose-home, via FK."""
-    p0, R0, _ = compute_fk(_model, q_home)
-    opt = R0[:, EIXO_OPTICO_COL].copy()
-    r = float(np.linalg.norm(p0))
-    c = p0 - r * opt
-    return p0, R0, c, r, opt
-
-
-def sinal_altura_de(geom):
-    """+1 se aumentar a altura (z) re-nivela um tilt 'pra cima'; -1 caso contrário.
-    Deduz da geometria: como o eixo óptico inclina (componente vertical) com o tilt."""
-    p0, R0, c, r, opt = geom
-    dd = 0.01
-    R_up = pin.AngleAxis(dd, R0[:, TILT_BODY_COL]).matrix() @ R0
-    dz = (R_up[:, EIXO_OPTICO_COL][2] - R0[:, EIXO_OPTICO_COL][2]) / dd
-    return 1.0 if dz > 0 else -1.0
-
-
-def resolver_ik(geom, pan, tilt, q_seed, altura=0.0):
-    """Mira (pan, tilt) em rad + 'altura' (m, vertical) → pose-alvo SE(3); resolve a IK.
-
-    PAN nasce da BASE (joint1): giramos a pose-alvo INTEIRA (posição E orientação) em
-    torno do Z do mundo na base → a IK resolve com o joint1 (suave, amplo, sem virar).
-    TILT é um pitch no eixo do CORPO (body-Y, punho), pós-multiplicado em R0.
-    ALTURA desloca a posição-alvo na vertical do mundo (sobe/desce a câmera):
-
-        R_alvo = Rz_world(pan) · R0 · Ry_body(tilt)
-        p_alvo = Rz_world(pan) · p0 + [0, 0, altura]
-
-    (parametrizar pan/tilt nos eixos do MUNDO travava a IK quando Z_link≈vertical).
-    Devolve (q, ok, iters, ms)."""
-    p0, R0, c, r, opt = geom
-    Rz = pin.AngleAxis(pan, np.array([0.0, 0.0, 1.0])).matrix()   # giro na base (mundo Z)
-    eixo_tilt = R0[:, TILT_BODY_COL]                              # eixo Y do corpo
-    Ry = pin.AngleAxis(tilt, eixo_tilt).matrix()
-    R = Rz @ Ry @ R0
-    p = Rz @ p0
-    p = p + np.array([0.0, 0.0, altura])                         # acompanha a altura
-    alvo = pos_rot_to_se3(p, R)
-    t0 = time.perf_counter()
-    res = solve_ik(_model, _data, _ee_id, alvo, q_seed.copy(), IK_RT)
-    ms = (time.perf_counter() - t0) * 1000.0
-    return res.q, res.success, res.iterations, ms
-
-
-# ──────────────────────────────── UI ──────────────────────────────────────────
-
-COR_TXT = (210, 210, 210)
-COR_TIT = (0, 215, 255)
-COR_OK = (100, 235, 140)
-COR_AVISO = (60, 175, 255)
-COR_ERRO = (80, 80, 245)
-COR_VAL = (235, 225, 130)
-COR_DIM = (150, 150, 150)
-TOAST_DUR = 3.0
-
-
-def painel(frame, x0, y0, linhas, escala=0.5, alpha=0.66):
-    fonte = cv2.FONT_HERSHEY_SIMPLEX
-    th = int(round(28 * (escala / 0.5)))
-    larg = max(cv2.getTextSize(it[0] if isinstance(it, (tuple, list)) else it,
-                               fonte, escala, 1)[0][0] for it in linhas)
-    x1, y1 = x0 + larg + 24, y0 + th * len(linhas) + 14
-    ovl = frame.copy()
-    cv2.rectangle(ovl, (x0, y0), (x1, y1), (18, 18, 18), -1)
-    cv2.addWeighted(ovl, alpha, frame, 1 - alpha, 0, dst=frame)
-    cv2.rectangle(frame, (x0, y0), (x1, y1), (85, 85, 85), 1)
-    y = y0 + th
-    for it in linhas:
-        txt, cor = it if isinstance(it, (tuple, list)) else (it, COR_TXT)
-        cv2.putText(frame, txt, (x0 + 12, y), fonte, escala, cor, 1, cv2.LINE_AA)
-        y += th
-    return x1, y1
-
-
-def desenha_toast(frame, texto, cor):
-    fonte = cv2.FONT_HERSHEY_SIMPLEX
-    (wt, ht), _ = cv2.getTextSize(texto, fonte, 0.75, 2)
-    w = frame.shape[1]
-    x0, x1 = (w - wt) // 2 - 20, (w + wt) // 2 + 20
-    ovl = frame.copy()
-    cv2.rectangle(ovl, (x0, 10), (x1, 36 + ht), (15, 15, 15), -1)
-    cv2.addWeighted(ovl, 0.78, frame, 0.22, 0, dst=frame)
-    cv2.rectangle(frame, (x0, 10), (x1, 36 + ht), cor, 2)
-    cv2.putText(frame, texto, (x0 + 20, 20 + ht), fonte, 0.75, cor, 2, cv2.LINE_AA)
-
-
-def tela_sem_braco():
-    img = np.full((300, 940, 3), 25, np.uint8)
-    for i, (txt, cor) in enumerate([
-            ("SEM COMUNICACAO COM O BRACO B601-DM", COR_ERRO),
-            ("Verifique se esta LIGADO e CONECTADO (USB / MotorBridge).", COR_TXT),
-            ("Ligue/conecte e rode de novo. (tecle algo p/ sair)", COR_DIM)]):
-        cv2.putText(img, txt, (28, 70 + i * 60), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.85, cor, 2, cv2.LINE_AA)
-    cv2.imshow("Camera Follow IK", img)
-    cv2.waitKey(8000)
-    cv2.destroyAllWindows()
-
-
-def motor_pronto(arm):
-    try:
-        for jc in arm._joints:
-            st = arm._motor_map[jc.name].get_state()
-            if st is None or getattr(st, "status_code", None) != 1:
-                return False
-        return True
-    except Exception:
-        return False
-
-
-def status_motores(arm):
-    """Código de status de cada motor (1 = habilitado/ok; >1 = erro/falha;
-    0 = desabilitado; -1 sem leitura). Para detectar a falha (LED vermelho)."""
-    out = []
-    for jc in arm._joints:
-        try:
-            st = arm._motor_map[jc.name].get_state()
-            out.append(int(getattr(st, "status_code", -1)) if st is not None else -1)
-        except Exception:
-            out.append(-1)
-    return out
-
-
-# ───────────────────────── log detalhado (JSONL) ──────────────────────────────
-
-class Diario:
-    """Log estruturado (uma linha JSON por registro). Captura config, eventos
-    (teclas, modos, falhas), saída de terminal e telemetria por frame. Pensado
-    para ser LIDO depois (inclusive pelo assistente) e reconstruir a sessão."""
-
-    def __init__(self, path):
-        self.f = open(path, "w")
-        self.t0 = time.time()
-        self.path = path
-
-    def _w(self, obj):
-        obj["t"] = round(time.time() - self.t0, 3)
-        try:
-            self.f.write(json.dumps(obj, ensure_ascii=False) + "\n")
-            self.f.flush()      # flush imediato: se travar/cair, o log sobrevive
-        except Exception:
-            pass
-
-    def config(self, **kv):
-        self._w({"tipo": "config", **kv})
-
-    def evento(self, ev, **kv):
-        self._w({"tipo": "evento", "ev": ev, **kv})
-
-    def frame(self, **kv):
-        self._w({"tipo": "frame", **kv})
-
-    def stdout(self, linha):
-        self._w({"tipo": "stdout", "linha": linha})
-
-    def close(self):
-        try:
-            self.f.close()
-        except Exception:
-            pass
-
-
-class Tee:
-    """Espelha o stdout: escreve no terminal E manda cada linha para um callback
-    (para gravar no log toda 'saída de terminal', inclusive a da lib do braço)."""
-
-    def __init__(self, orig, cb):
-        self.orig, self.cb, self._buf = orig, cb, ""
-
-    def write(self, s):
-        self.orig.write(s)
-        self._buf += s
-        while "\n" in self._buf:
-            linha, self._buf = self._buf.split("\n", 1)
-            if linha.strip():
-                try:
-                    self.cb(linha)
-                except Exception:
-                    pass
-
-    def flush(self):
-        self.orig.flush()
-
-
-# ──────────────────────────────── main ────────────────────────────────────────
 
 def main():
     os.makedirs(LOG_DIR, exist_ok=True)
@@ -415,7 +134,7 @@ def main():
     max_step = np.radians(MAX_STEP_DEG)
     margem = np.radians(MARGEM_LIMITE_DEG)
 
-    fase = "posicionar"        # "posicionar" (MIT/float) | "seguir" (POS_VEL/IK)
+    fase = "posicionar"        # "posicionar" (flutuando) | "seguir" (IK)
     tracking = False
     calibrado = False          # 'k' mede sinal+escala reais (essencial p/ não divergir)
     base_pan, base_tilt = 0.0, 0.0     # mira (rad) relativa à home (0 = encarando)
@@ -456,15 +175,14 @@ def main():
             tela_sem_braco()
             return
         # SEMPRE MIT (como o 08): entra em MIT UMA vez (com o braço sentado = carga
-        # baixa, seguro) e o loop único roda do início ao fim. Nunca troca de modo →
-        # 'f' instantâneo, sem despencar; acordar sobe reto.
+        # baixa, seguro) e o loop único roda do início ao fim. Nunca troca de modo.
         est["q_target"] = np.asarray(arm.get_positions(), dtype=float).copy()
         est["livre"] = False
         est["tracking"] = False
         arm.mode_mit(kp=np.full(n, KP), kd=np.full(n, KD))
         arm.start_control_loop(controlador)
 
-        janela = "Camera Follow - Etapa 1 (braco todo via IK)"
+        janela = "Camera Follow - IK (modular)"
         cv2.namedWindow(janela, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(janela, JANELA_W, JANELA_H)
 
@@ -495,8 +213,7 @@ def main():
             aviso("Home travada - modo SEGUIR (IK). 't' liga o tracking.", COR_OK)
 
         def voltar_a_flutuar(msg="Flutuando - mova o braco com a mao. ESPACO encara."):
-            """Volta a flutuar (segue a mão). INSTANTÂNEO: já estamos em MIT, então é
-            só ligar o flag — sem troca de modo, sem vão, SEM DESPENCAR (validado no lab)."""
+            """Volta a flutuar (segue a mão). INSTANTÂNEO: já em MIT, só liga o flag."""
             nonlocal fase, tracking
             est["tracking"] = False
             est["q_target"] = np.asarray(arm.get_positions(), dtype=float).copy()
@@ -509,7 +226,7 @@ def main():
             aviso(msg, COR_AVISO)
 
         def ramp_repouso():
-            """Pouso suave: leva o alvo ao repouso devagar (POS_VEL já limita a vel.)."""
+            """Pouso suave: leva o alvo ao repouso devagar e SEGURA até assentar."""
             if fase != "seguir":
                 return
             est["tracking"] = False          # o integral sustenta durante a descida
@@ -528,8 +245,6 @@ def main():
                     cv2.imshow(janela, fr)
                     cv2.waitKey(1)
             est["q_target"][:] = dest
-            # SEGURA até CHEGAR de fato (senão o torque corta antes e ele "cai" o
-            # último trecho). Espera assentar dentro de ~1° ou estoura o tempo.
             t1 = time.time()
             while time.time() - t1 < 2.5:
                 if np.max(np.abs(np.asarray(arm.get_positions()) - dest)) < np.radians(1.0):
@@ -606,8 +321,8 @@ def main():
                   f"sinais {sinal_pan:+d}/{sinal_tilt:+d}", cor)
 
         def acordar(cfg):
-            """Com config salva: aplica calibração/ajustes e ACORDA suave (POS_VEL,
-            sem tranco) da pose atual até a home, já ligando o tracking."""
+            """Com config salva: aplica calibração/ajustes e ACORDA suave (rampa MIT)
+            da pose atual até a home, parando na pose (você liga o seguir com 't')."""
             nonlocal fase, geom, base_pan, base_tilt, tracking, calibrado
             nonlocal sinal_pan, sinal_tilt, radpx_x, radpx_y, altura, sinal_altura
             nonlocal kp_servo, deadzone_px, limite_deg, previsao_ms
@@ -626,14 +341,13 @@ def main():
             sinal_altura = sinal_altura_de(geom)
             est["tracking"] = False          # integral sustenta durante a subida
             ini = np.asarray(arm.get_positions(), dtype=float).copy()
-            # Log do ponto de partida vs destino (p/ ver o que cada junta percorre).
             diario.evento("acordar_ini",
                           ini_deg=[round(float(np.degrees(x)), 1) for x in ini],
                           home_deg=[round(float(np.degrees(x)), 1) for x in home],
                           delta_deg=[round(float(np.degrees(home[i] - ini[i])), 1)
                                      for i in range(n)])
             t0 = time.time()
-            while True:                       # rampa suave (POS_VEL já está rodando)
+            while True:                       # rampa suave (o loop MIT segue o alvo)
                 frac = (time.time() - t0) / DUR_ACORDAR
                 if frac >= 1.0:
                     break
@@ -658,7 +372,7 @@ def main():
             aviso("Acordei na sua pose. Tecle 't' para te seguir. (k recalibra | n salva | ESC)",
                   COR_OK)
 
-        # Decide o início: com config -> acorda e já segue; sem -> flutua p/ posar.
+        # Decide o início: com config -> acorda na pose; sem -> flutua p/ posar.
         cfg_ik = carregar_config_ik()
         if cfg_ik is not None:
             acordar(cfg_ik)
@@ -723,9 +437,6 @@ def main():
                     altura = float(np.clip(altura, -alt_max, alt_max))
 
             # ---- IK: mira → orientação (ponto fixo) → 6 juntas ----
-            # A mira só AVANÇA se a IK conseguir acompanhar. Se a solução "virar"
-            # (salto grande = singularidade) ou não convergir, DESFAZEMOS o passo da
-            # mira (sem deadlock). A velocidade real é limitada pelo POS_VEL (vlim).
             if fase == "seguir" and not fault_ativo:
                 q_ik, ok, ik_iters, ik_ms = resolver_ik(geom, base_pan, base_tilt,
                                                         est["q_target"], altura)
@@ -758,7 +469,7 @@ def main():
                                       tilt=round(float(np.degrees(base_tilt)), 1),
                                       altura=round(altura, 3))
 
-            # ---- telemetria por frame (o que eu leio depois para "ver" a sessão) ----
+            # ---- telemetria por frame ----
             diario.frame(i=frame_idx, fase=fase, trk=bool(tracking and not fault_ativo),
                          face=([int(ponto_cru[0]), int(ponto_cru[1])] if ponto_cru else None),
                          prev=([int(prev[0]), int(prev[1])] if prev is not None else None),
@@ -804,7 +515,7 @@ def main():
                 cal = ("calibrado: OK" if calibrado else "calibrado: NAO (tecle k)",
                        COR_OK if calibrado else COR_ERRO)
                 linhas = [
-                    ("== CAMERA FOLLOW — IK (Etapa 1) ==", COR_TIT),
+                    ("== CAMERA FOLLOW — IK (modular) ==", COR_TIT),
                     modo,
                     cal,
                     (f"mira: pan={np.degrees(base_pan):+.1f} tilt={np.degrees(base_tilt):+.1f}deg  "

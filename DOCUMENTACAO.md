@@ -78,7 +78,12 @@ camera-follow/
 ├── 07_pose_e_jog.py   # Posiciona o braço (float+lock por gravidade) + jog
 ├── 08_seguir.py       # >>> APLICAÇÃO COMPLETA (2 juntas): a garra te encara + gestos + UI
 ├── 09_ik_lab.py       # Bancada de IK (SEM braço): geometria, envelope, latência (Etapa 0)
-├── 10_seguir_ik.py    # braço TODO via IK — "pescoço fixo" (Etapa 1, FUNCIONAL)
+├── 10_seguir_ik.py    # Etapa 1 via IK — versão MONOLÍTICA (referência; mantida intacta)
+├── seguir_ik.py       # >>> Etapa 1 via IK, MODULAR (use esta): laço + teclas + servo/altura
+├── mira_ik.py         #   módulo: modelo Pinocchio + IK (geometria, resolver_ik, sinal_altura)
+├── controle_braco.py  #   módulo: loop MIT (gravidade) + estado `est` + motores
+├── ui_hud.py          #   módulo: cores, painel, toast, tela sem braço
+├── diario.py          #   módulo: log JSONL + Tee do terminal
 ├── lab_modo.py        # Bancada de CONTROLE (só braço): isola hold/flutuar (MIT vs POS_VEL)
 ├── models/face_detection_yunet_2023mar.onnx
 ├── config_seguir.json     # (gitignored) calibração do 08 (2 juntas)
@@ -484,32 +489,50 @@ Modo de controle: **MIT-sempre + poses-alvo pra IK** (sem POS_VEL, sem troca de 
 
 - **Etapa 0 — Bancada de IK (`09_ik_lab.py`, SEM braço):** ✅ **feita.** Geometria,
   limites, convenção de mira e latência do solver. *(ver resultados abaixo.)*
-- **Etapa 1 — Núcleo MIT + IK (`10_seguir_ik.py`):** ✅ **FUNCIONAL.** Segue o rosto na
-  horizontal (pan pela base) e na vertical (tilt pelo punho), suave e firme.
-- **Etapa 2 — Re-plugar autonomia + gestos** no núcleo novo (head-tilt vira *roll* no
-  eixo da câmera). ← **próximo**
-- **Etapa 3 — "pescoço que se estica"** (posição 3D do rosto, standoff, altura dos olhos).
+- **Etapa 1 — Núcleo MIT + IK (`seguir_ik.py`, modular):** ✅ **FUNCIONAL.** Segue o
+  rosto (pan pela base, tilt pelo punho) + **acompanha a altura** (sobe/desce). Suave,
+  firme, com auto-calibração, salvar/acordar e recuperação anti-trava.
+- **Etapa 3 (vertical) — altura dos olhos:** ✅ **FEITA** (trazida pra frente): o braço
+  sobe/desce devagar pra re-nivelar o olhar. Falta a parte de **alcance/lean** (se
+  aproximar quando você se inclina) — fica pra depois.
+- **Etapa 2 — autonomia + gestos** no núcleo novo: **fuga/perseguição** (vai pro lado
+  que você sumiu — já existe no `08`), varredura, head-tilt (vira *roll* no eixo da
+  câmera). ← **próximo**
 
-#### Etapa 1 — o que o `10_seguir_ik.py` já faz
+#### Etapa 1 — o que a app de IK já faz (`seguir_ik.py`)
+
+> **Arquitetura modular:** a app foi refatorada (lado-a-lado, sem tocar no `10`, que
+> fica como referência) em **`seguir_ik.py`** (orquestração: laço + teclas + servo/
+> altura) + módulos **`mira_ik.py`** (modelo + IK), **`controle_braco.py`** (loop MIT +
+> estado `est` + motores), **`ui_hud.py`** (HUD) e **`diario.py`** (log). O `10`
+> monolítico (927 linhas) virou `seguir_ik` (638) + 4 módulos focados. **Use o
+> `seguir_ik.py`.**
 
 - **Sempre MIT** (sem troca de modo). **PAN pela base** + **TILT pelo punho**; kp
   **firme** pra seguir / **mole** pra flutuar (ver Aprendizados 8–10).
 - **Auto-calibração (`k`)**, malha aberta com você **parado**: cutuca a mira ±8° e mede
-  **sinal + escala (px/grau)** reais. Saiu **~15 px/deg** nos dois eixos (saudável).
+  **sinal + escala (px/grau)** reais (~15 px/deg, saudável).
+- **Acompanhamento de ALTURA (`h` liga/desliga, `v`/`b` ajusta o alcance):** se o tilt
+  se MANTÉM (você ficou mais alto/baixo), o braço **sobe/desce devagar** pra te encarar
+  na **altura dos olhos** (cascata "olhar guia a altura", sem estimar profundidade).
+  É a 1ª parte da Etapa 3 (só vertical), trazida pra cá. Tilt fica **modesto (±30°)**
+  porque a altura cobre o vertical → evita poses extremas.
 - **Salvar/Acordar (`n` / `z`):** salva home + repouso (sentado) + calibração + ajustes
-  em `config_seguir_ik.json`. Na próxima vez **acorda sozinho na pose** (rampa suave,
-  sobe reto) e fica pronto pra seguir (tecle `t`). `z` marca o "sentado" limpo.
-- **Segurança:** envelope pequeno ajustável; se a IK "virar", **desfaz** o passo da
-  mira (sem disparada); detecção de falha de motor (congela); ESC volta ao repouso
-  segurando até assentar.
+  em `config_seguir_ik.json`. Na próxima vez **acorda na pose** (rampa suave, sobe reto)
+  e fica pronto pra seguir (tecle `t`). `z` marca o "sentado" limpo.
+- **Segurança:** envelope do pan ajustável; se a IK "virar", **desfaz** o passo (sem
+  disparada); se ficar **PRESA** (>8 frames), **recua e re-semeia do home** pra
+  destravar; detecção de falha de motor (congela); ESC volta ao repouso segurando até
+  assentar.
 - **Log JSONL detalhado** (`logs_ik/`): config, teclas, eventos, saída de terminal e
-  **telemetria por frame** (rosto/erro, mira, q_alvo e q_real das 6 juntas, status dos
-  motores). Foi a ferramenta que permitiu diagnosticar tudo isto à distância.
-- **Teclas do `10`:** `ESPACO` trava a home · `k` calibra · `t` segue · `f` flutua ·
-  `z` marca sentado · `n` salva · `o`/`p` zona morta · `[`/`]` ganho · `-`/`=` envelope
-  · `,`/`.` previsão · `x`/`y` sinais · `c` recentra · `i` esconde · `ESC` sai.
+  **telemetria por frame** (rosto/erro, mira, altura, q_alvo e q_real das 6 juntas,
+  status dos motores). Foi a ferramenta que permitiu diagnosticar tudo à distância.
+- **Teclas:** `ESPACO` trava a home · `k` calibra · `t` segue · `f` flutua · `z` marca
+  sentado · `n` salva · `h` altura on/off · `v`/`b` alcance de altura · `o`/`p` zona ·
+  `[`/`]` ganho · `-`/`=` envelope · `,`/`.` previsão · `x`/`y` sinais · `c` recentra ·
+  `i` esconde · `ESC` sai.
 - **Bancada de controle `lab_modo.py`** (só o braço, sem câmera/IK): isola hold/flutuar
-  — foi onde provamos que **MIT-sempre** resolve a queda do `f`. Fica como ferramenta.
+  — onde provamos que **MIT-sempre** resolve a queda do `f`. Fica como ferramenta.
 - **Pendência conhecida (não-crítica):** depois do `f` (flutuar), voltar ao tracking
   (ESPACO → `t`) nem sempre reengata — a investigar com log.
 
