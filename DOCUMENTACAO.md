@@ -82,9 +82,12 @@ camera-follow/
 ├── seguir_ik.py       # >>> Etapa 1 via IK, MODULAR (use esta): laço + teclas + servo/altura
 ├── mira_ik.py         #   módulo: modelo Pinocchio + IK (geometria, resolver_ik, sinal_altura)
 ├── controle_braco.py  #   módulo: loop MIT (gravidade) + estado `est` + motores
+├── autonomia.py       #   módulo: fuga/perseguição (vai pro lado que você sumiu)
+├── gestos.py          #   módulo: perfil do head-tilt (roll no eixo óptico)
 ├── ui_hud.py          #   módulo: cores, painel, toast, tela sem braço
 ├── diario.py          #   módulo: log JSONL + Tee do terminal
 ├── lab_modo.py        # Bancada de CONTROLE (só braço): isola hold/flutuar (MIT vs POS_VEL)
+├── lab_pescoco.py     # Bancada GUIADA: valida o pan pelo PUNHO vs BASE (o "pescoço")
 ├── models/face_detection_yunet_2023mar.onnx
 ├── config_seguir.json     # (gitignored) calibração do 08 (2 juntas)
 ├── config_seguir_ik.json  # (gitignored) calibração do 10 (IK: home+repouso+escala+ajustes)
@@ -517,6 +520,13 @@ Modo de controle: **MIT-sempre + poses-alvo pra IK** (sem POS_VEL, sem troca de 
   na **altura dos olhos** (cascata "olhar guia a altura", sem estimar profundidade).
   É a 1ª parte da Etapa 3 (só vertical), trazida pra cá. Tilt fica **modesto (±30°)**
   porque a altura cobre o vertical → evita poses extremas.
+- **Fuga/perseguição (`u`, módulo `autonomia.py`):** quando o rosto some, vai **reto pro
+  lado** que você saiu (alcança longe via base), espera, e re-centraliza ao reaparecer.
+- **Head-tilt (`g`, módulo `gestos.py`):** inclina a cabeça pro ombro (roll no eixo
+  óptico = joint6) **sem parar de te encarar**; durante o gesto pan/tilt/fuga congelam.
+- **"Pescoço" (cascata pan, `9`/`0` faixa, `j` sinal):** pan PEQUENO pelo **PUNHO**
+  (joint5, ~18 px/deg — validado em `lab_pescoco.py`), base parada; ao saturar, a
+  **BASE** (joint1) assume o resto. Faixa do punho ajustável ao vivo.
 - **Salvar/Acordar (`n` / `z`):** salva home + repouso (sentado) + calibração + ajustes
   em `config_seguir_ik.json`. Na próxima vez **acorda na pose** (rampa suave, sobe reto)
   e fica pronto pra seguir (tecle `t`). `z` marca o "sentado" limpo.

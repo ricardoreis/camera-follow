@@ -40,6 +40,8 @@ from ui_hud import (  # noqa: E402
     painel, desenha_toast, tela_sem_braco,
 )
 from diario import Diario, Tee  # noqa: E402
+from autonomia import Autonomia  # noqa: E402
+from gestos import perfil_head_tilt, HEAD_TILT_DEG  # noqa: E402
 
 import camera  # noqa: E402
 from detector import DetectorFaces  # noqa: E402
@@ -65,6 +67,12 @@ ALTURA_MAX_DEFAULT = 0.12   # alcance vertical inicial (m, ± deste valor); ajus
 LIMITE_TILT_DEG = 30.0      # tilt modesto (a ALTURA cobre o vertical) → evita pose extrema
 FALHAS_MAX = 8              # IK falhando + que isso seguidas = PRESO → recua p/ destravar
 
+# "PESCOÇO": o pan PEQUENO é feito pelo PUNHO (joint5, ~18 px/deg — validado no
+# lab_pescoco); o GRANDE pela BASE (joint1, via IK). Cascata: divide o pan total em
+# neck (punho, capado em NECK_MAX) + base (o resto). Faixa ajustável ao vivo (9/0).
+NECK_MAX_DEG = 10.0         # quanto o punho paneia antes da base entrar
+PESCOCO_J5 = 4             # índice do joint5 (punho)
+
 # Auto-calibração (tecla 'k'): cutuca a MIRA ±DELTA e mede o deslocamento do rosto.
 DELTA_CAL_DEG = 8.0
 CAL_SETTLE_S = 0.8
@@ -80,13 +88,16 @@ CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 
 def salvar_config_ik(repouso, home, sinal_pan, sinal_tilt, radpx_x, radpx_y,
-                     kp_servo, deadzone_px, limite_deg, previsao_ms):
-    """Salva home + repouso (sentado) + calibração + ajustes de feel."""
+                     kp_servo, deadzone_px, limite_deg, previsao_ms,
+                     alt_max, altura_on, neck_max, sinal_neck):
+    """Salva home + repouso (sentado) + calibração + ajustes de feel + altura + pescoço."""
     data = {"repouso": [float(x) for x in repouso], "home": [float(x) for x in home],
             "sinal_pan": int(sinal_pan), "sinal_tilt": int(sinal_tilt),
             "radpx_x": float(radpx_x), "radpx_y": float(radpx_y),
             "kp_servo": float(kp_servo), "deadzone_px": int(deadzone_px),
-            "limite_deg": float(limite_deg), "previsao_ms": float(previsao_ms)}
+            "limite_deg": float(limite_deg), "previsao_ms": float(previsao_ms),
+            "alt_max": float(alt_max), "altura_on": bool(altura_on),
+            "neck_max": float(neck_max), "sinal_neck": int(sinal_neck)}
     with open(CONFIG_PATH, "w") as f:
         json.dump(data, f, indent=2)
 
@@ -144,6 +155,16 @@ def main():
     sinal_altura = 1.0         # sentido (deduzido da geometria ao travar/acordar)
     n_falhas = 0               # IK seguidas falhando (p/ destravar quando preso)
     t_prev = time.time()       # p/ o dt do integrador lento da altura
+    perseguicao_on = True      # 'u': quando o rosto some, vai pro lado que voce saiu
+    auto_estado = "seguindo"   # seguindo | perseguindo | esperando
+    auto_seta = 0.0            # direção da saída (p/ HUD)
+    autonomia = Autonomia(max_step)
+    gesto_t0 = None            # 'g': head-tilt em andamento (None = nenhum)
+    gesto_dir = 1              # alterna o lado a cada disparo
+    neck_max = NECK_MAX_DEG    # faixa do pescoço (punho) em graus; ajustável (9/0)
+    sinal_neck = -1            # sentido do joint5 (lab: oposto da base); flip com 'j'
+    q_ref = None               # seed da IK SEM o pescoço (não contamina o warm-start)
+    neck = 0.0                 # pan atual do punho (rad), p/ HUD/log
     geom = None
     ik_ok, ik_iters, ik_ms = True, 0, 0.0
     fault_ativo = False        # algum motor falhou (LED vermelho) → congela e avisa
@@ -194,12 +215,15 @@ def main():
 
         def entrar_em_seguir():
             """Trava a home e deriva a geometria. (Sem troca de modo: já em MIT.)"""
-            nonlocal fase, geom, base_pan, base_tilt, altura, sinal_altura
+            nonlocal fase, geom, base_pan, base_tilt, altura, sinal_altura, gesto_t0, q_ref
+            gesto_t0 = None
             est["home"] = arm.get_positions().copy()
             geom = geometria(est["home"])
             base_pan = base_tilt = 0.0
             altura = 0.0
             sinal_altura = sinal_altura_de(geom)
+            q_ref = est["home"].copy()
+            autonomia.reset()
             est["q_target"] = est["home"].copy()
             est["livre"] = False
             fase = "seguir"
@@ -214,12 +238,14 @@ def main():
 
         def voltar_a_flutuar(msg="Flutuando - mova o braco com a mao. ESPACO encara."):
             """Volta a flutuar (segue a mão). INSTANTÂNEO: já em MIT, só liga o flag."""
-            nonlocal fase, tracking
+            nonlocal fase, tracking, gesto_t0
             est["tracking"] = False
             est["q_target"] = np.asarray(arm.get_positions(), dtype=float).copy()
             est["integral"] = None
             est["livre"] = True
             tracking = False
+            gesto_t0 = None
+            autonomia.reset()
             fase = "posicionar"
             diario.evento("voltou_flutuar",
                           q_deg=[round(float(np.degrees(x)), 1) for x in arm.get_positions()])
@@ -323,9 +349,10 @@ def main():
         def acordar(cfg):
             """Com config salva: aplica calibração/ajustes e ACORDA suave (rampa MIT)
             da pose atual até a home, parando na pose (você liga o seguir com 't')."""
-            nonlocal fase, geom, base_pan, base_tilt, tracking, calibrado
+            nonlocal fase, geom, base_pan, base_tilt, tracking, calibrado, q_ref
             nonlocal sinal_pan, sinal_tilt, radpx_x, radpx_y, altura, sinal_altura
-            nonlocal kp_servo, deadzone_px, limite_deg, previsao_ms
+            nonlocal kp_servo, deadzone_px, limite_deg, previsao_ms, alt_max, altura_on
+            nonlocal neck_max, sinal_neck
             home = np.asarray(cfg["home"], dtype=float)
             est["home"] = home.copy()
             est["repouso"] = np.asarray(cfg["repouso"], dtype=float)
@@ -335,10 +362,15 @@ def main():
             deadzone_px = int(cfg.get("deadzone_px", DEADZONE_PX))
             limite_deg = float(cfg.get("limite_deg", LIMITE_DEG))
             previsao_ms = float(cfg.get("previsao_ms", PREVISAO_MS))
+            alt_max = float(cfg.get("alt_max", ALTURA_MAX_DEFAULT))
+            altura_on = bool(cfg.get("altura_on", True))
+            neck_max = float(cfg.get("neck_max", NECK_MAX_DEG))
+            sinal_neck = int(cfg.get("sinal_neck", -1))
             geom = geometria(home)
             base_pan = base_tilt = 0.0
             altura = 0.0
             sinal_altura = sinal_altura_de(geom)
+            q_ref = home.copy()
             est["tracking"] = False          # integral sustenta durante a subida
             ini = np.asarray(arm.get_positions(), dtype=float).copy()
             diario.evento("acordar_ini",
@@ -363,13 +395,13 @@ def main():
             est["q_target"][:] = home
             calibrado = True
             fase = "seguir"
-            tracking = False     # acorda NA pose configurada; você liga o seguir com 't'
+            tracking = True      # acorda JÁ seguindo (padrão); 't' pausa se quiser
             diario.evento("acordou",
                           home_deg=[round(float(np.degrees(x)), 2) for x in home],
                           sinais=[sinal_pan, sinal_tilt],
                           ppd=[round(np.radians(1) / radpx_x, 1),
                                round(np.radians(1) / radpx_y, 1)])
-            aviso("Acordei na sua pose. Tecle 't' para te seguir. (k recalibra | n salva | ESC)",
+            aviso("Acordei e estou te seguindo. (t pausa | k recalibra | n salva | ESC)",
                   COR_OK)
 
         # Decide o início: com config -> acorda na pose; sem -> flutua p/ posar.
@@ -419,7 +451,9 @@ def main():
             prev_pan, prev_tilt, prev_altura = base_pan, base_tilt, altura  # p/ DESFAZER
 
             # ---- SERVO VISUAL → mira (pan, tilt) ----
-            if (fase == "seguir" and tracking and not fault_ativo
+            # Durante um head-tilt (gesto_t0) o pan/tilt CONGELA: a câmera rola sem
+            # perseguir o alvo (que sai do lugar por causa do roll na imagem).
+            if (fase == "seguir" and tracking and not fault_ativo and gesto_t0 is None
                     and ponto_cru is not None and prev is not None):
                 dx, dy = prev[0] - cx, prev[1] - cy
                 erro = (dx, dy)
@@ -436,15 +470,45 @@ def main():
                     altura += ALTURA_GANHO * sinal_altura * base_tilt * dt_frame
                     altura = float(np.clip(altura, -alt_max, alt_max))
 
-            # ---- IK: mira → orientação (ponto fixo) → 6 juntas ----
+            # ---- FUGA/perseguição: se o rosto SUMIU, vai pro lado que você saiu e
+            # espera; se está presente, devolve a mira sem mexer (o servo comanda).
+            # (Não persegue durante um head-tilt — o roll some com o rosto na imagem.) ----
+            if (fase == "seguir" and tracking and not fault_ativo and perseguicao_on
+                    and gesto_t0 is None):
+                base_pan, base_tilt, auto_estado, auto_seta = autonomia.update(
+                    ponto_cru, prev, cx, cy, base_pan, base_tilt,
+                    sinal_pan, sinal_tilt, radpx_x, radpx_y, lim, lim_tilt)
+            else:
+                auto_estado = "seguindo"
+
+            # ---- HEAD-TILT: roll no eixo óptico (não-bloqueante) ----
+            roll = 0.0
+            if gesto_t0 is not None:
+                p_ht = perfil_head_tilt(time.time() - gesto_t0)
+                if p_ht is None:
+                    gesto_t0 = None
+                else:
+                    roll = gesto_dir * np.radians(HEAD_TILT_DEG) * p_ht
+
+            # ---- PESCOÇO: divide o pan total em PUNHO (pequeno) + BASE (resto) ----
+            # neck = parte que o punho (joint5) faz, capada em ±neck_max; o que passar
+            # disso vai pra base (joint1, via IK). Pequeno → só punho; grande → base entra.
+            neck = float(np.clip(base_pan, -np.radians(neck_max), np.radians(neck_max)))
+            base_ik = base_pan - neck
+
+            # ---- IK: mira (base_ik via base) → 6 juntas; o punho entra POR CIMA ----
             if fase == "seguir" and not fault_ativo:
-                q_ik, ok, ik_iters, ik_ms = resolver_ik(geom, base_pan, base_tilt,
-                                                        est["q_target"], altura)
+                q_ik, ok, ik_iters, ik_ms = resolver_ik(geom, base_ik, base_tilt,
+                                                        q_ref, altura, roll)
                 if ok:
-                    jump = float(np.degrees(np.max(np.abs(q_ik - est["q_target"]))))
+                    jump = float(np.degrees(np.max(np.abs(q_ik - q_ref))))
                 if ok and jump <= IK_FLIP_DEG:
                     np.clip(q_ik, _LO + margem, _HI - margem, out=q_ik)
-                    est["q_target"][:] = q_ik
+                    q_ref[:] = q_ik                          # seed limpo p/ o próximo frame
+                    q_ik[PESCOCO_J5] = float(np.clip(        # pescoço: offset no punho
+                        q_ik[PESCOCO_J5] + sinal_neck * neck,
+                        _LO[PESCOCO_J5] + margem, _HI[PESCOCO_J5] - margem))
+                    est["q_target"][:] = q_ik                # comando = IK + pescoço
                     ik_ok = True
                     n_falhas = 0
                 else:
@@ -455,14 +519,15 @@ def main():
                     else:                          # PRESO → recua a mira/altura e caminha
                         base_pan, base_tilt = prev_pan * 0.9, prev_tilt * 0.9   # rumo ao centro
                         altura = prev_altura * 0.9
-                        # re-semeia do HOME (sempre tem solução) e move o alvo DEVAGAR pra lá
-                        q2, ok2, _, _ = resolver_ik(geom, base_pan, base_tilt,
+                        nk = float(np.clip(base_pan, -np.radians(neck_max), np.radians(neck_max)))
+                        q2, ok2, _, _ = resolver_ik(geom, base_pan - nk, base_tilt,
                                                     est["home"], altura)
                         if ok2:
                             np.clip(q2, _LO + margem, _HI - margem, out=q2)
                             passo = np.radians(3.0)
-                            est["q_target"][:] += np.clip(q2 - est["q_target"], -passo, passo)
-                            if np.degrees(np.max(np.abs(q2 - est["q_target"]))) < 2.0:
+                            q_ref[:] += np.clip(q2 - q_ref, -passo, passo)
+                            est["q_target"][:] = q_ref
+                            if np.degrees(np.max(np.abs(q2 - q_ref))) < 2.0:
                                 n_falhas = 0       # destravou
                         diario.evento("ik_destravando",
                                       pan=round(float(np.degrees(base_pan)), 1),
@@ -476,7 +541,9 @@ def main():
                          err=([int(erro[0]), int(erro[1])] if erro else None),
                          pan=round(float(np.degrees(base_pan)), 2),
                          tilt=round(float(np.degrees(base_tilt)), 2),
-                         altura=round(altura, 3), n_falhas=n_falhas,
+                         altura=round(altura, 3), n_falhas=n_falhas, auto=auto_estado,
+                         neck=round(float(np.degrees(neck)), 1),
+                         base_ik=round(float(np.degrees(base_ik)), 1),
                          qd=[round(float(np.degrees(x)), 1) for x in est["q_target"]],
                          qr=[round(float(np.degrees(x)), 1) for x in pos],
                          ik=[bool(ik_ok), int(ik_iters), round(float(ik_ms), 2)],
@@ -529,8 +596,14 @@ def main():
                     (f"sinais x/y: {sinal_pan:+d}/{sinal_tilt:+d}   "
                      f"ESCALA: {np.radians(1)/radpx_x:.1f} / {np.radians(1)/radpx_y:.1f} px/deg",
                      COR_VAL),
-                    ("ESPACO encara | k calibra | n salva | t pausa | h altura | v/b alcance | "
-                     "o/p zona | -/= envelope | x/y sinais | f flutua | ESC", COR_DIM),
+                    (f"fuga(u): {'ON ' if perseguicao_on else 'off'} estado: {auto_estado.upper()}"
+                     + ((' -->' if auto_seta > 0 else ' <--') if auto_estado != "seguindo" else ""),
+                     COR_AVISO if auto_estado == "perseguindo" else COR_DIM),
+                    (f"pescoco(9/0): +/-{neck_max:.0f}deg  punho={np.degrees(neck):+.0f}  "
+                     f"base={np.degrees(base_ik):+.0f}  sinal(j)={sinal_neck:+d}", COR_VAL),
+                    ("ESPACO encara | k calibra | n salva | t pausa | u fuga | g head-tilt | "
+                     "9/0 pescoco | j sinal | h altura | v/b alcance | o/p zona | -/= envelope | "
+                     "x/y sinais | f flutua | ESC", COR_DIM),
                 ]
                 painel(frame, 8, 8, linhas, escala=0.5)
 
@@ -600,11 +673,30 @@ def main():
                 alt_max = max(0.0, round(alt_max - 0.02, 2))
                 altura = float(np.clip(altura, -alt_max, alt_max))
                 aviso(f"Alcance de altura: +/-{alt_max*100:.0f} cm", COR_VAL)
+            elif k == ord("u"):              # fuga/perseguição on/off
+                perseguicao_on = not perseguicao_on
+                autonomia.reset()
+                aviso("Perseguicao ON (vai pro lado que voce sumiu)" if perseguicao_on
+                      else "Perseguicao OFF", COR_OK if perseguicao_on else COR_DIM)
+            elif k == ord("g"):              # head-tilt (inclina a cabeca, alterna o lado)
+                if fase == "seguir":
+                    gesto_t0 = time.time()
+                    gesto_dir = -gesto_dir
+            elif k == ord("0"):              # + faixa do pescoço (punho)
+                neck_max = min(40.0, round(neck_max + 2.0, 1))
+                aviso(f"Pescoco (punho) ate +/-{neck_max:.0f} deg", COR_VAL)
+            elif k == ord("9"):              # - faixa do pescoço
+                neck_max = max(0.0, round(neck_max - 2.0, 1))
+                aviso(f"Pescoco (punho) ate +/-{neck_max:.0f} deg", COR_VAL)
+            elif k == ord("j"):              # flip do sinal do pescoço (se virar errado)
+                sinal_neck = -sinal_neck
+                aviso(f"Sinal do pescoco (punho): {sinal_neck:+d}", COR_VAL)
             elif k == ord("n"):              # salva config (acorda sozinho na proxima)
                 if calibrado and est.get("home") is not None:
                     salvar_config_ik(est["repouso"], est["home"], sinal_pan, sinal_tilt,
                                      radpx_x, radpx_y, kp_servo, deadzone_px,
-                                     limite_deg, previsao_ms)
+                                     limite_deg, previsao_ms, alt_max, altura_on,
+                                     neck_max, sinal_neck)
                     aviso("Config salva! Proxima vez ele acorda e segue sozinho.", COR_OK)
                 else:
                     aviso("Trave a home (ESPACO) e calibre (k) antes de salvar", COR_AVISO)
