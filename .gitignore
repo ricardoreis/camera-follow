@@ -9,9 +9,13 @@ __pycache__/
 
 # Configuração local (calibração específica do SEU braço/câmera)
 config_seguir.json
+config_seguir_ik.json
 
 # Logs de debug (tecla 'd')
 log_*.csv
+
+# Logs detalhados da Etapa 1 (IK)
+logs_ik/
 
 # Editores / SO
 .vscode/

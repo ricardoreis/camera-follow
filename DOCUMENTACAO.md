@@ -76,9 +76,14 @@ camera-follow/
 ├── 04_suavizacao.py   # Fase 4: laboratório (cru x One Euro x Kalman + osciloscópio)
 ├── 05_rastreador.py   # Fase 5: rastreamento + erro em graus (FOV)
 ├── 07_pose_e_jog.py   # Posiciona o braço (float+lock por gravidade) + jog
-├── 08_seguir.py       # >>> APLICAÇÃO COMPLETA: a garra te encara + gestos + UI
+├── 08_seguir.py       # >>> APLICAÇÃO COMPLETA (2 juntas): a garra te encara + gestos + UI
+├── 09_ik_lab.py       # Bancada de IK (SEM braço): geometria, envelope, latência (Etapa 0)
+├── 10_seguir_ik.py    # braço TODO via IK — "pescoço fixo" (Etapa 1, FUNCIONAL)
+├── lab_modo.py        # Bancada de CONTROLE (só braço): isola hold/flutuar (MIT vs POS_VEL)
 ├── models/face_detection_yunet_2023mar.onnx
-├── config_seguir.json # (gitignored) calibração específica do SEU braço/câmera
+├── config_seguir.json     # (gitignored) calibração do 08 (2 juntas)
+├── config_seguir_ik.json  # (gitignored) calibração do 10 (IK: home+repouso+escala+ajustes)
+├── logs_ik/           # (gitignored) logs JSONL detalhados do 10/lab (debug por frame)
 ├── gestos.json        # (compartilhável) presets de head-tilt
 ├── requirements.txt
 ├── README.md
@@ -153,6 +158,54 @@ Os erros e correções que ensinaram mais:
 7. **GPU não ajuda aqui:** o gargalo é **latência física** (câmera + USB + reação do
    motor), não processamento. YuNet já roda em ~8 ms na CPU. O caminho pra mais
    agilidade é **reduzir latência** (captura em thread), não força bruta.
+
+### Aprendizados da Etapa 1 — braço todo via IK (`10_seguir_ik.py`)
+
+Esta etapa rendeu vários aprendizados duros (e caros em tempo) — ficam aqui pra não
+se repetirem:
+
+8. **POS_VEL × MIT — a armadilha que mais custou.** A decisão inicial (registrada
+   nesta doc) foi *"POS_VEL para seguir + MIT só pra capturar a home"*, só porque o
+   exemplo de IK da Seeed (`ArmEndPos`) usa POS_VEL. **Estava errada.** O detalhe fatal
+   só apareceu lendo o `arm.py` da lib: **trocar de modo (`mode_mit`/`mode_pos_vel`) é
+   BLOQUEANTE ~0,5 s** (junta por junta, com `sleep`) — durante a troca os motores
+   ficam **sem comando de sustentação** → o braço **DESPENCA** (e duas threads na
+   serial dão *"broken pipe"*). **Solução: ficar SEMPRE em MIT** (hold + seguir +
+   flutuar), **nunca trocar de modo** — exatamente o que o `08` já fazia. **Lição
+   dupla:** (a) quando há contra-evidência na mão (o `08` MIT-sempre funcionava),
+   **questione a decisão registrada**; (b) **isolar o problema** numa bancada mínima
+   (`lab_modo.py`, sem câmera/IK/UI) foi o que destravou o diagnóstico — depurar na
+   app inteira era às cegas.
+
+9. **Pan tem que nascer da BASE; girar nos eixos do MUNDO trava a IK.** Parametrizar
+   pan/tilt como rotação da orientação em torno dos eixos do **mundo** fazia, na home
+   flutuada, o "pan" virar rotação do end_link em torno do seu próprio eixo ≈ vertical
+   (`Z_link ≈ vertical`) → a IK precisava **virar a configuração** (salto > 15°) → a
+   trava de segurança revertia todo frame → **o braço não paneava** (e a calibração
+   media ~0 px/deg, porque o nudge de pan não movia nada). **Correção:** **PAN = girar
+   a pose-alvo INTEIRA em torno da base** (`p = Rz(pan)·p0`, `R = Rz(pan)·R0·…`) → a IK
+   resolve com o **joint1**, suave e 1:1. **TILT = pitch no eixo do CORPO** (body-Y, o
+   punho). Validado por simulação em 3 homes: 0 reverts, < 1,5°/frame.
+
+10. **A gravidade carrega o TILT, não o PAN → kp firme só onde pesa.** O pan (joint1,
+    base) **não luta contra a gravidade** → kp mole basta (só fica um pouco lento). O
+    tilt usa **ombro/cotovelo/punho**, que **seguram o peso do braço** → com kp mole
+    (8, herdado do `08`) eles **cediam** → o tilt ficava "elástico" (bounce sem parar,
+    parando no teto/chão). **Correção:** **kp FIRME** (os ganhos de fábrica do MIT:
+    ~120 nas juntas grandes, ~18 no punho) para **segurar/seguir**, e **kp mole (8) só
+    para flutuar** com a mão (escolha automática pelo flag `livre`, sem trocar modo).
+    No `08` o tilt era o **punho (leve)**, por isso o problema não aparecia.
+
+11. **A calibração mede o que REALMENTE acontece.** A escala *"pan 0,07 px/deg"* da
+    auto-calibração **não era a óptica** — era o pan **travado** (a IK revertia o
+    nudge). A auto-calibração (malha aberta, parado) é o melhor diagnóstico de plant:
+    número saudável (~15 px/deg) = funcionando; ~0 = algo bloqueando o movimento.
+
+12. **Drop ao desligar = física, não bug.** Quando o ESC desliga o torque, a gravidade
+    deixa de ser compensada e o braço cede até **apoiar**. Some-se a isso o torque
+    cortar antes de o braço **chegar** ao alvo. **Mitigação:** segurar até assentar
+    (esperar `|q−alvo| < ~1°`) antes de desligar, e marcar o "sentado" com o braço
+    **apoiado de verdade** (não suspenso).
 
 ---
 
@@ -337,34 +390,164 @@ head-tilt enlouquecendo o tracking (roll perde a face → resolvido congelando p
 no gesto); perseguição com tilt espúrio (era o `sign()` → trocado por direção
 proporcional). Ver seção 6.
 
-**Limitação conhecida (motiva o próximo passo):** com só 2 juntas do punho e escala
+**Limitação conhecida do `08` (motivou a IK):** com só 2 juntas do punho e escala
 ~2,5 px/deg, o alcance angular é pequeno (±limite cobre ~200px de tela). Na
 perseguição a câmera vai na direção certa **mas não alcança** quem foge pra bem longe.
+
+### Etapa 1 da IK (`10_seguir_ik.py`) — ✅ funcional
+
+O braço **inteiro** segue o rosto via IK ("pescoço fixo"): **pan pela base** (joint1,
+faixa ampla) e **tilt pelo punho**, suave e firme, sem despencar no flutuar e subindo
+reto ao acordar. Acorda sozinho na pose salva, auto-calibra (`k`), salva config (`n`).
+Arquitetura **MIT-sempre**. Detalhes e a jornada (com as armadilhas) na seção 13 e nos
+Aprendizados 8–12 (seção 6). **Próximo:** re-plugar autonomia + gestos (Etapa 2).
 
 ---
 
 ## 13. Próximas etapas (roadmap)
 
-### ➡️ PRÓXIMO PASSO (decidido): 🦾 Braço todo via Cinemática Inversa (IK)
+### ➡️ EM ANDAMENTO: 🦾 Braço todo via Cinemática Inversa (IK)
 
 Controlar a **pose do end-effector** (posição + orientação da câmera) com o **braço
-inteiro** via IK, em vez de só 2 juntas do punho. **Por que é o próximo (cura a
-limitação raiz):**
-- **Alcance:** o braço varre um workspace muito maior → a perseguição/busca
-  **realmente alcança** a pessoa (resolve a limitação acima).
-- **Altura dos olhos:** o braço se reposiciona pra manter a câmera **na altura do
-  rosto**, encarando de frente — mais natural.
-- **Torna a detecção de corpo menos necessária** (seria um "remendo" pro alcance).
+inteiro** via IK, em vez de só 2 juntas do punho. **Por que (cura a limitação raiz):**
+alcance maior (a busca **realmente alcança**), câmera na **altura dos olhos**, e torna
+a detecção de corpo menos necessária.
 
-**De-risca bastante:** o repo do braço **já tem IK pronto e testado** —
-`example/5_fk_test.py`, `6_ik_test.py`, `7_arm_ik_control.py`, `8_arm_traj_control.py`
-+ Pinocchio + os controladores em `reBotArm_control_py/controllers/`. O plano é
-**integrar nosso rastreamento ao IK existente**, não construir do zero.
+#### O que já existe no repo do braço (não vamos reescrever IK)
 
-**A planejar (próxima sessão):** estudar os exemplos 5–8 e a cinemática; definir como
-mapear *erro do rosto (px) → pose-alvo do end-effector* (apontar + manter altura);
-segurança/limites do workspace; fatiar em passos seguros (ler → mover pouco →
-integrar), como fizemos com o controle 2-juntas. Inspiração conceitual:
+O `reBotArm_control_py` já traz uma stack de IK completa e robusta. **Vamos só
+alimentar poses-alvo de câmera.**
+
+- **Controlador de alto nível `ArmEndPos`** (`controllers/arm_endpos_controller.py`):
+  - `.start()` → conecta, entra em **modo POS_VEL**, habilita e roda **sozinho um loop
+    de 500 Hz** (manda `pos_vel` para um `_q_target` interno).
+  - `.move_to_ik(x, y, z, roll, pitch, yaw)` → resolve a IK na hora (CLIK) e seta o alvo.
+  - `.move_to_traj(...)` → trajetória **suave** (min-jerk geodésica em SE(3) + CLIK).
+  - `.safe_home()` / `.end()` → volta à zero com segurança.
+- **Solver CLIK** (`kinematics/inverse_kinematics.py`): mínimos quadrados amortecidos
+  (Levenberg-Marquardt, damping adaptativo, line-search, *retry* aleatório, respeita
+  limites de junta). Modelo Pinocchio carregado do URDF. Frame da ponta = **`end_link`**.
+
+#### A geometria do B601-dm (medida via Pinocchio)
+
+| Junta | Função | Limite |
+|---|---|---|
+| **joint1** | **giro da base (pan!)** | **±160°** |
+| joint2 | ombro | [−180°, 0°] |
+| **join3** *(sic — typo no próprio URDF)* | cotovelo | [−180°, 0°] |
+| joint4 | punho (tilt) | [−107°, +90°] |
+| joint5 | punho | ±90° |
+| joint6 | rotação (roll) | ±180° |
+
+Ponto-chave: hoje o pan/tilt usa **2 juntas do punho** (~±40° úteis). Com a IK, a
+**joint1 sozinha dá ±160° de pan** e o conjunto ombro/cotovelo/punho dá uma faixa
+grande de tilt — **é a cura da limitação de alcance**. Alcance ~0,26 m à frente,
+e dá pra levantar a câmera até ~0,37 m de altura. (`nq=6`, FK em zero → `end_link`
+em `(0.26, 0, 0.19)` m.)
+
+#### ⚙️ A arquitetura de controle (CORRIGIDA — ver Aprendizados 8–10)
+
+> **Nota histórica:** a decisão inicial era *"POS_VEL para seguir + MIT só pra
+> capturar a home"* (porque o exemplo `ArmEndPos` usa POS_VEL). **Isso se mostrou
+> errado** — ver o Aprendizado #8. A arquitetura final é a abaixo.
+
+**SEMPRE em modo MIT + compensação de gravidade** (igual ao `08`), com um **único loop
+de 500 Hz que nunca para e nunca troca de modo**. Trocar POS_VEL↔MIT é bloqueante
+(~0,5 s) e deixava o braço despencar — então não trocamos. O mesmo loop MIT faz tudo:
+- **Segurar/seguir** (`livre=False`): kp **firme** (ganhos de fábrica do MIT, ~120/18)
+  → não cede sob gravidade; durante o tracking o integral é zerado (o laço visual é o
+  integrador).
+- **Flutuar** (`livre=True`): kp **mole** (8) + segue a mão → reposicionar.
+O "atuador" no fim do loop deixou de ser 2 juntas e passou a ser **a IK** (q_target das
+6 juntas). Toda a visão (servo proporcional, deadzone, predição, calibração) é a mesma.
+
+#### A decisão de design (com o usuário)
+
+Nosso servo calcula um **olhar desejado** (pan/tilt); convertemos isso numa **pose-alvo
+SE(3)** e a IK resolve as 6 juntas. Em duas fases:
+
+- **Fase 1 — "pescoço fixo" (FEITA):** a câmera fica num ponto e só **re-mira**.
+  Parametrização que funciona (ver Aprendizado #9):
+  - **PAN = girar a pose-alvo inteira em torno da BASE** → `p_alvo = Rz(pan)·p0`,
+    `R_alvo = Rz(pan)·R0·…` → a IK usa o **joint1** (suave, 1:1, faixa grande).
+  - **TILT = pitch no eixo do CORPO** (body-Y, punho) → `R_alvo = …·R0·Ry_body(tilt)`.
+  - *(O modelo "órbita" da bancada **falhava na prática**: girar a orientação nos eixos
+    do mundo travava a IK quando `Z_link≈vertical`. Por isso a versão final é
+    ponto-fixo com pan-pela-base, não a órbita.)*
+- **Fase 2 — "pescoço que se estica" (futuro):** a ponta **translada** pra manter a
+  altura dos olhos e "esticar" o alcance — exige posição 3D do rosto (direção +
+  distância pelo tamanho da caixa) + extrínseco da câmera.
+
+Modo de controle: **MIT-sempre + poses-alvo pra IK** (sem POS_VEL, sem troca de modo).
+
+#### Plano — "pescoço fixo" via IK (em etapas)
+
+- **Etapa 0 — Bancada de IK (`09_ik_lab.py`, SEM braço):** ✅ **feita.** Geometria,
+  limites, convenção de mira e latência do solver. *(ver resultados abaixo.)*
+- **Etapa 1 — Núcleo MIT + IK (`10_seguir_ik.py`):** ✅ **FUNCIONAL.** Segue o rosto na
+  horizontal (pan pela base) e na vertical (tilt pelo punho), suave e firme.
+- **Etapa 2 — Re-plugar autonomia + gestos** no núcleo novo (head-tilt vira *roll* no
+  eixo da câmera). ← **próximo**
+- **Etapa 3 — "pescoço que se estica"** (posição 3D do rosto, standoff, altura dos olhos).
+
+#### Etapa 1 — o que o `10_seguir_ik.py` já faz
+
+- **Sempre MIT** (sem troca de modo). **PAN pela base** + **TILT pelo punho**; kp
+  **firme** pra seguir / **mole** pra flutuar (ver Aprendizados 8–10).
+- **Auto-calibração (`k`)**, malha aberta com você **parado**: cutuca a mira ±8° e mede
+  **sinal + escala (px/grau)** reais. Saiu **~15 px/deg** nos dois eixos (saudável).
+- **Salvar/Acordar (`n` / `z`):** salva home + repouso (sentado) + calibração + ajustes
+  em `config_seguir_ik.json`. Na próxima vez **acorda sozinho na pose** (rampa suave,
+  sobe reto) e fica pronto pra seguir (tecle `t`). `z` marca o "sentado" limpo.
+- **Segurança:** envelope pequeno ajustável; se a IK "virar", **desfaz** o passo da
+  mira (sem disparada); detecção de falha de motor (congela); ESC volta ao repouso
+  segurando até assentar.
+- **Log JSONL detalhado** (`logs_ik/`): config, teclas, eventos, saída de terminal e
+  **telemetria por frame** (rosto/erro, mira, q_alvo e q_real das 6 juntas, status dos
+  motores). Foi a ferramenta que permitiu diagnosticar tudo isto à distância.
+- **Teclas do `10`:** `ESPACO` trava a home · `k` calibra · `t` segue · `f` flutua ·
+  `z` marca sentado · `n` salva · `o`/`p` zona morta · `[`/`]` ganho · `-`/`=` envelope
+  · `,`/`.` previsão · `x`/`y` sinais · `c` recentra · `i` esconde · `ESC` sai.
+- **Bancada de controle `lab_modo.py`** (só o braço, sem câmera/IK): isola hold/flutuar
+  — foi onde provamos que **MIT-sempre** resolve a queda do `f`. Fica como ferramenta.
+- **Pendência conhecida (não-crítica):** depois do `f` (flutuar), voltar ao tracking
+  (ESPACO → `t`) nem sempre reengata — a investigar com log.
+
+#### 📊 Resultados da bancada (`09_ik_lab.py`)
+
+A bancada revelou **duas coisas decisivas**:
+
+1. **Latência da IK é irrelevante.** Com *warm-start* (parte do `q` atual + alvo
+   pertinho, como o servo faz frame a frame): **~0,03 ms, 1 iteração**. O orçamento por
+   frame a 24 FPS é ~42 ms → a IK não é gargalo nenhum.
+2. **Fixar a câmera num ponto ABSOLUTO limita o pan a ±60°** (pra girar parada no mesmo
+   ponto o braço se contorce e esgota juntas). O modelo que dá a faixa grande é o de
+   **cabeça num pescoço** — a câmera **orbita** um pivô fixo (raio fixo), mirando
+   radialmente pra fora:
+
+   ```
+   R_alvo = Rz(pan)·Ry(tilt)·R0                       (gira a mira)
+   p_alvo = c + r·(Rz(pan)·Ry(tilt)·eixo_óptico)       (orbita o pivô c, raio r)
+   ```
+
+| Modelo (na bancada) | PAN | TILT |
+|---|---|---|
+| Hoje (2 juntas do punho) | ~±40° | ~±40° |
+| IK ponto absoluto fixo | ±60° | ±40° |
+| IK pivô/órbita (teórico) | ±120° | ±40° |
+
+   > ⚠️ **Mas a órbita falhou no hardware** (girar a orientação nos eixos do mundo
+   > travava a IK — Aprendizado #9). A **versão final** usa **PAN pela base** (joint1,
+   > faixa ampla, suave) + **TILT pelo punho** — não a órbita. O tilt fica em ±40°
+   > (limite vertical do braço), suficiente pra seguir um rosto.
+
+> **De-risca a Etapa 1:** como nosso servo é de **malha fechada** (corrige o erro em
+> pixels via auto-calibração), a geometria do pivô **não precisa ser exata** — basta a
+> câmera apontar pra fora que o servo zera o erro.
+
+**Segurança (Etapa 1):** warm-start a cada frame (sem saltos); se a IK não convergir,
+**segura a última pose**; clamp do envelope (começa pequeno, ~±25°); ESC com pouso
+suave (`safe_home`/repouso); começa **sentado**. Inspiração conceitual:
 UR_Facetracking (UR5 + RTDE + IK, controla pose do end-effector).
 
 ### Depois do IK
