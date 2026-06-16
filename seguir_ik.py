@@ -72,6 +72,8 @@ FALHAS_MAX = 8              # IK falhando + que isso seguidas = PRESO → recua 
 # neck (punho, capado em NECK_MAX) + base (o resto). Faixa ajustável ao vivo (9/0).
 NECK_MAX_DEG = 10.0         # quanto o punho paneia antes da base entrar
 PESCOCO_J5 = 4             # índice do joint5 (punho)
+NECK_RELAX = 0.6           # /s: quão rápido o punho "desenrola" pro 0 e a base assume
+                           #   (a cabeca endireita devagar; a base compensa o giro)
 
 # Auto-calibração (tecla 'k'): cutuca a MIRA ±DELTA e mede o deslocamento do rosto.
 DELTA_CAL_DEG = 8.0
@@ -89,7 +91,7 @@ CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 def salvar_config_ik(repouso, home, sinal_pan, sinal_tilt, radpx_x, radpx_y,
                      kp_servo, deadzone_px, limite_deg, previsao_ms,
-                     alt_max, altura_on, neck_max, sinal_neck):
+                     alt_max, altura_on, neck_max, sinal_neck, neck_relax):
     """Salva home + repouso (sentado) + calibração + ajustes de feel + altura + pescoço."""
     data = {"repouso": [float(x) for x in repouso], "home": [float(x) for x in home],
             "sinal_pan": int(sinal_pan), "sinal_tilt": int(sinal_tilt),
@@ -97,7 +99,8 @@ def salvar_config_ik(repouso, home, sinal_pan, sinal_tilt, radpx_x, radpx_y,
             "kp_servo": float(kp_servo), "deadzone_px": int(deadzone_px),
             "limite_deg": float(limite_deg), "previsao_ms": float(previsao_ms),
             "alt_max": float(alt_max), "altura_on": bool(altura_on),
-            "neck_max": float(neck_max), "sinal_neck": int(sinal_neck)}
+            "neck_max": float(neck_max), "sinal_neck": int(sinal_neck),
+            "neck_relax": float(neck_relax)}
     with open(CONFIG_PATH, "w") as f:
         json.dump(data, f, indent=2)
 
@@ -163,8 +166,10 @@ def main():
     gesto_dir = 1              # alterna o lado a cada disparo
     neck_max = NECK_MAX_DEG    # faixa do pescoço (punho) em graus; ajustável (9/0)
     sinal_neck = -1            # sentido do joint5 (lab: oposto da base); flip com 'j'
+    neck_relax = NECK_RELAX    # velocidade do "desenrolar" (/s); ajustável (w/e), salva no n
     q_ref = None               # seed da IK SEM o pescoço (não contamina o warm-start)
     neck = 0.0                 # pan atual do punho (rad), p/ HUD/log
+    pan_base = 0.0             # parte do pan que a BASE assume (lenta; desenrola o punho)
     geom = None
     ik_ok, ik_iters, ik_ms = True, 0, 0.0
     fault_ativo = False        # algum motor falhou (LED vermelho) → congela e avisa
@@ -215,12 +220,14 @@ def main():
 
         def entrar_em_seguir():
             """Trava a home e deriva a geometria. (Sem troca de modo: já em MIT.)"""
-            nonlocal fase, geom, base_pan, base_tilt, altura, sinal_altura, gesto_t0, q_ref
+            nonlocal fase, geom, base_pan, base_tilt, altura, sinal_altura, gesto_t0
+            nonlocal q_ref, pan_base
             gesto_t0 = None
             est["home"] = arm.get_positions().copy()
             geom = geometria(est["home"])
             base_pan = base_tilt = 0.0
             altura = 0.0
+            pan_base = 0.0
             sinal_altura = sinal_altura_de(geom)
             q_ref = est["home"].copy()
             autonomia.reset()
@@ -349,10 +356,10 @@ def main():
         def acordar(cfg):
             """Com config salva: aplica calibração/ajustes e ACORDA suave (rampa MIT)
             da pose atual até a home, parando na pose (você liga o seguir com 't')."""
-            nonlocal fase, geom, base_pan, base_tilt, tracking, calibrado, q_ref
+            nonlocal fase, geom, base_pan, base_tilt, tracking, calibrado, q_ref, pan_base
             nonlocal sinal_pan, sinal_tilt, radpx_x, radpx_y, altura, sinal_altura
             nonlocal kp_servo, deadzone_px, limite_deg, previsao_ms, alt_max, altura_on
-            nonlocal neck_max, sinal_neck
+            nonlocal neck_max, sinal_neck, neck_relax
             home = np.asarray(cfg["home"], dtype=float)
             est["home"] = home.copy()
             est["repouso"] = np.asarray(cfg["repouso"], dtype=float)
@@ -366,9 +373,11 @@ def main():
             altura_on = bool(cfg.get("altura_on", True))
             neck_max = float(cfg.get("neck_max", NECK_MAX_DEG))
             sinal_neck = int(cfg.get("sinal_neck", -1))
+            neck_relax = float(cfg.get("neck_relax", NECK_RELAX))
             geom = geometria(home)
             base_pan = base_tilt = 0.0
             altura = 0.0
+            pan_base = 0.0
             sinal_altura = sinal_altura_de(geom)
             q_ref = home.copy()
             est["tracking"] = False          # integral sustenta durante a subida
@@ -490,11 +499,15 @@ def main():
                 else:
                     roll = gesto_dir * np.radians(HEAD_TILT_DEG) * p_ht
 
-            # ---- PESCOÇO: divide o pan total em PUNHO (pequeno) + BASE (resto) ----
-            # neck = parte que o punho (joint5) faz, capada em ±neck_max; o que passar
-            # disso vai pra base (joint1, via IK). Pequeno → só punho; grande → base entra.
-            neck = float(np.clip(base_pan, -np.radians(neck_max), np.radians(neck_max)))
-            base_ik = base_pan - neck
+            # ---- PESCOÇO (cascata com "desenrolar") ----
+            # O PUNHO (joint5) faz o pan RÁPIDO; a BASE (joint1) "desenrola" o punho de
+            # volta ao 0 e assume o giro (a cabeca endireita, o corpo compensa). Se o
+            # punho satura (±neck_max), a base assume o excedente NA HORA. Camera pan =
+            # pan_base + neck = base_pan sempre (rosto fica centralizado o tempo todo).
+            pan_base += neck_relax * (base_pan - pan_base) * dt_frame   # base assume devagar
+            neck = float(np.clip(base_pan - pan_base, -np.radians(neck_max), np.radians(neck_max)))
+            pan_base = base_pan - neck     # punho saturou → base assume o resto na hora
+            base_ik = pan_base
 
             # ---- IK: mira (base_ik via base) → 6 juntas; o punho entra POR CIMA ----
             if fase == "seguir" and not fault_ativo:
@@ -519,8 +532,8 @@ def main():
                     else:                          # PRESO → recua a mira/altura e caminha
                         base_pan, base_tilt = prev_pan * 0.9, prev_tilt * 0.9   # rumo ao centro
                         altura = prev_altura * 0.9
-                        nk = float(np.clip(base_pan, -np.radians(neck_max), np.radians(neck_max)))
-                        q2, ok2, _, _ = resolver_ik(geom, base_pan - nk, base_tilt,
+                        pan_base *= 0.9
+                        q2, ok2, _, _ = resolver_ik(geom, pan_base, base_tilt,
                                                     est["home"], altura)
                         if ok2:
                             np.clip(q2, _LO + margem, _HI - margem, out=q2)
@@ -600,10 +613,11 @@ def main():
                      + ((' -->' if auto_seta > 0 else ' <--') if auto_estado != "seguindo" else ""),
                      COR_AVISO if auto_estado == "perseguindo" else COR_DIM),
                     (f"pescoco(9/0): +/-{neck_max:.0f}deg  punho={np.degrees(neck):+.0f}  "
-                     f"base={np.degrees(base_ik):+.0f}  sinal(j)={sinal_neck:+d}", COR_VAL),
+                     f"base={np.degrees(base_ik):+.0f}  sinal(j)={sinal_neck:+d}  "
+                     f"desenrolar(w/e)={neck_relax:.1f}", COR_VAL),
                     ("ESPACO encara | k calibra | n salva | t pausa | u fuga | g head-tilt | "
-                     "9/0 pescoco | j sinal | h altura | v/b alcance | o/p zona | -/= envelope | "
-                     "x/y sinais | f flutua | ESC", COR_DIM),
+                     "9/0 pescoco | w/e desenrola | j sinal | h altura | v/b alcance | o/p zona | "
+                     "-/= envelope | x/y sinais | f flutua | ESC", COR_DIM),
                 ]
                 painel(frame, 8, 8, linhas, escala=0.5)
 
@@ -691,12 +705,18 @@ def main():
             elif k == ord("j"):              # flip do sinal do pescoço (se virar errado)
                 sinal_neck = -sinal_neck
                 aviso(f"Sinal do pescoco (punho): {sinal_neck:+d}", COR_VAL)
+            elif k == ord("e"):              # + rápido o desenrolar (cabeça endireita logo)
+                neck_relax = min(3.0, round(neck_relax + 0.1, 1))
+                aviso(f"Desenrolar do pescoco: {neck_relax:.1f}/s", COR_VAL)
+            elif k == ord("w"):              # - rápido o desenrolar (mais devagar)
+                neck_relax = max(0.0, round(neck_relax - 0.1, 1))
+                aviso(f"Desenrolar do pescoco: {neck_relax:.1f}/s", COR_VAL)
             elif k == ord("n"):              # salva config (acorda sozinho na proxima)
                 if calibrado and est.get("home") is not None:
                     salvar_config_ik(est["repouso"], est["home"], sinal_pan, sinal_tilt,
                                      radpx_x, radpx_y, kp_servo, deadzone_px,
                                      limite_deg, previsao_ms, alt_max, altura_on,
-                                     neck_max, sinal_neck)
+                                     neck_max, sinal_neck, neck_relax)
                     aviso("Config salva! Proxima vez ele acorda e segue sozinho.", COR_OK)
                 else:
                     aviso("Trave a home (ESPACO) e calibre (k) antes de salvar", COR_AVISO)

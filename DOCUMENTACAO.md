@@ -524,9 +524,12 @@ Modo de controle: **MIT-sempre + poses-alvo pra IK** (sem POS_VEL, sem troca de 
   lado** que você saiu (alcança longe via base), espera, e re-centraliza ao reaparecer.
 - **Head-tilt (`g`, módulo `gestos.py`):** inclina a cabeça pro ombro (roll no eixo
   óptico = joint6) **sem parar de te encarar**; durante o gesto pan/tilt/fuga congelam.
-- **"Pescoço" (cascata pan, `9`/`0` faixa, `j` sinal):** pan PEQUENO pelo **PUNHO**
-  (joint5, ~18 px/deg — validado em `lab_pescoco.py`), base parada; ao saturar, a
-  **BASE** (joint1) assume o resto. Faixa do punho ajustável ao vivo.
+- **"Pescoço" (cascata pan):** pan PEQUENO pelo **PUNHO** (joint5, ~18 px/deg —
+  validado em `lab_pescoco.py`); ao saturar, a **BASE** (joint1) assume o resto. E o
+  **"desenrolar"**: a base vira devagar enquanto o punho **volta ao 0** (a cabeça
+  endireita, o corpo compensa) — a câmera segue te encarando o tempo todo (camera pan
+  = punho + base = pan total). Teclas: `9`/`0` faixa do punho · `w`/`e` velocidade do
+  desenrolar · `j` inverte sinal. Tudo ajustável ao vivo e salvo no `n`.
 - **Salvar/Acordar (`n` / `z`):** salva home + repouso (sentado) + calibração + ajustes
   em `config_seguir_ik.json`. Na próxima vez **acorda na pose** (rampa suave, sobe reto)
   e fica pronto pra seguir (tecle `t`). `z` marca o "sentado" limpo.
