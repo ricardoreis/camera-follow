@@ -493,14 +493,25 @@ Modo de controle: **MIT-sempre + poses-alvo pra IK** (sem POS_VEL, sem troca de 
 - **Etapa 0 — Bancada de IK (`09_ik_lab.py`, SEM braço):** ✅ **feita.** Geometria,
   limites, convenção de mira e latência do solver. *(ver resultados abaixo.)*
 - **Etapa 1 — Núcleo MIT + IK (`seguir_ik.py`, modular):** ✅ **FUNCIONAL.** Segue o
-  rosto (pan pela base, tilt pelo punho) + **acompanha a altura** (sobe/desce). Suave,
-  firme, com auto-calibração, salvar/acordar e recuperação anti-trava.
-- **Etapa 3 (vertical) — altura dos olhos:** ✅ **FEITA** (trazida pra frente): o braço
-  sobe/desce devagar pra re-nivelar o olhar. Falta a parte de **alcance/lean** (se
-  aproximar quando você se inclina) — fica pra depois.
-- **Etapa 2 — autonomia + gestos** no núcleo novo: **fuga/perseguição** (vai pro lado
-  que você sumiu — já existe no `08`), varredura, head-tilt (vira *roll* no eixo da
-  câmera). ← **próximo**
+  rosto (pan com **pescoço** punho→base + desenrolar, tilt pelo punho) + **acompanha a
+  altura**. Suave, firme, com auto-calibração, salvar/acordar e recuperação anti-trava.
+- **Etapa 3 (vertical) — altura dos olhos:** ✅ **FEITA**: o braço sobe/desce devagar
+  pra re-nivelar o olhar (cascata tilt→altura, simétrica ao pescoço pan).
+- **Etapa 2 — autonomia + gestos:** **fuga/perseguição** ✅, **head-tilt** ✅,
+  **pescoço (pan punho+base)** ✅. Falta **"dar vida"**: curiosidade (head-tilt sozinho
+  quando você fica parado), **varredura** (olhar ao redor quando te perde de vez) e
+  micro-movimento "respirar". ← **EM PLANEJAMENTO**
+
+#### 🗂️ Fila de próximos passos (depois do "dar vida")
+
+1. **🦒 Pescoço que se ESTICA — parte 2 (lean/reach):** aproximar/afastar a câmera
+   quando você se inclina pra frente/trás (profundidade). Completa o "pescoço que se
+   estica" físico. **Precisa estimar a distância** (pelo tamanho do rosto na imagem).
+2. **🎭 Personalidade / gestos:** salvar **vários** head-tilts (estilos/presets, tipo
+   `gestos.json` do `08`), **randomização** (pra não repetir igual) e um **"humor/
+   excitação" global** que modula os movimentos.
+3. **🔧 Pendência:** corrigir o bug de **re-engatar o tracking depois do `f`** (flutuar
+   → ESPACO → `t` nem sempre reengata) — investigar com log.
 
 #### Etapa 1 — o que a app de IK já faz (`seguir_ik.py`)
 
