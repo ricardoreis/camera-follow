@@ -31,6 +31,7 @@ previsão, pescoço, altura…) — ajustáveis ao vivo e salvos no 'n'.
 
 import json
 import os
+import random
 import sys
 import time
 
@@ -51,8 +52,9 @@ from ui_hud import (  # noqa: E402
     painel, desenha_toast, tela_sem_braco,
 )
 from diario import Diario, Tee  # noqa: E402
-from autonomia import Autonomia  # noqa: E402
+from autonomia_viva import Autonomia  # noqa: E402  (fuga + varredura; original intacto)
 from gestos import aplicar_gesto, GESTO_TIPOS, HT_DESCE  # noqa: E402
+from vida import respirar, Curiosidade  # noqa: E402
 from engine_estado import ESTADO  # noqa: E402
 import servidor_web  # noqa: E402
 
@@ -87,6 +89,13 @@ NECK_MAX_DEG = 10.0         # quanto o punho paneia antes da base entrar
 PESCOCO_J5 = 4             # índice do joint5 (punho)
 NECK_RELAX = 0.6           # /s: quão rápido o punho "desenrola" pro 0 e a base assume
                            #   (a cabeca endireita devagar; a base compensa o giro)
+
+# COMPORTAMENTOS ("vida"): curiosidade (gesto sozinho quando parado), respirar
+# (micro-movimento ocioso) e a varredura (em autonomia_viva.py). Defaults ajustáveis.
+PARADO_S = 5.0             # s parado+centralizado p/ disparar curiosidade
+COOLDOWN_S = 9.0          # s entre reações automáticas
+VEL_PARADO = 80.0         # px/s: abaixo disso o alvo é "parado"
+RESPIRAR_AMP = 1.0        # intensidade do micro-movimento ocioso (0 = estátua)
 
 # Auto-calibração (tecla 'k'): cutuca a MIRA ±DELTA e mede o deslocamento do rosto.
 DELTA_CAL_DEG = 8.0
@@ -126,6 +135,10 @@ def par_default():
         "altura_ganho": ALTURA_GANHO, "altura_zona": ALTURA_ZONA_DEG,
         "gesto_tipo": "single",
         "gestos": {t: dict(d) for t, d in GESTO_DEF.items()},   # config POR gesto
+        # comportamentos ("vida")
+        "procurar_on": True, "curioso_on": True, "respirar_on": True,
+        "respirar_amp": RESPIRAR_AMP, "parado_s": PARADO_S, "cooldown_s": COOLDOWN_S,
+        "vel_parado": VEL_PARADO,
     }
 
 
@@ -150,6 +163,13 @@ AJUSTES_SPEC = [
     ("GESTOS",   "g_vel",        "velocidade",       0.05, 0.10,  1.50, "f2s"),
     ("GESTOS",   "g_hold",       "hold",              0.1, 0.0,   4.0,  "f1s"),
     ("GESTOS",   "g_curioso",    "usa na curiosidade",  0,   0,     1,  "bool"),
+    ("COMPORTAMENTOS", "procurar_on",  "procurar (fuga+varredura)", 0, 0, 1, "bool"),
+    ("COMPORTAMENTOS", "curioso_on",   "curiosidade",         0,   0,    1,  "bool"),
+    ("COMPORTAMENTOS", "parado_s",     "parado p/ reagir",  0.5, 1.0, 20.0,  "f1s"),
+    ("COMPORTAMENTOS", "cooldown_s",   "intervalo",         1.0, 2.0, 40.0,  "f1s"),
+    ("COMPORTAMENTOS", "vel_parado",   "limiar 'parado'",    10,  20,  300,  "px"),
+    ("COMPORTAMENTOS", "respirar_on",  "respirar",            0,   0,    1,  "bool"),
+    ("COMPORTAMENTOS", "respirar_amp", "intensidade respiro", 0.2, 0.0, 4.0, "f1"),
 ]
 
 
@@ -300,10 +320,10 @@ def main():
     sinal_altura = 1.0         # sentido (deduzido da geometria ao travar/acordar)
     n_falhas = 0               # IK seguidas falhando (p/ destravar quando preso)
     t_prev = time.time()       # p/ o dt do integrador lento da altura
-    perseguicao_on = True      # 'u': quando o rosto some, vai pro lado que voce saiu
-    auto_estado = "seguindo"   # seguindo | perseguindo | esperando
+    auto_estado = "seguindo"   # seguindo | perseguindo | varrendo | ocioso
     auto_seta = 0.0            # direção da saída (p/ HUD)
     autonomia = Autonomia(max_step)
+    curiosidade = Curiosidade()  # dispara um gesto sozinho quando você fica parado
     gesto_t0 = None            # gesto em andamento (None = nenhum); 'g'/1..7 disparam
     gesto_dir = 1              # alterna o lado a cada disparo (single)
     gesto_tipo = "single"      # tipo do gesto em andamento
@@ -432,6 +452,7 @@ def main():
             sinal_altura = sinal_altura_de(geom)
             q_ref = est["home"].copy()
             autonomia.reset()
+            curiosidade.reset()
             est["q_target"] = est["home"].copy()
             est["livre"] = False
             fase = "seguir"
@@ -454,6 +475,7 @@ def main():
             tracking = False
             gesto_t0 = None
             autonomia.reset()
+            curiosidade.reset()
             fase = "posicionar"
             diario.evento("voltou_flutuar",
                           q_deg=[round(float(np.degrees(x)), 1) for x in arm.get_positions()])
@@ -684,13 +706,32 @@ def main():
             # ---- FUGA/perseguição: se o rosto SUMIU, vai pro lado que você saiu e
             # espera; se está presente, devolve a mira sem mexer (o servo comanda).
             # (Não persegue durante um head-tilt — o roll some com o rosto na imagem.) ----
-            if (fase == "seguir" and tracking and not fault_ativo and perseguicao_on
+            autonomia.varredura_on = par["procurar_on"]
+            if (fase == "seguir" and tracking and not fault_ativo and par["procurar_on"]
                     and gesto_t0 is None):
                 base_pan, base_tilt, auto_estado, auto_seta = autonomia.update(
                     ponto_cru, prev, cx, cy, base_pan, base_tilt,
                     sinal_pan, sinal_tilt, radpx_x, radpx_y, lim, lim_tilt)
             else:
                 auto_estado = "seguindo"
+
+            # ---- VIDA: curiosidade (gesto sozinho parado) + respirar (overlay ocioso) ----
+            idle_pan = idle_tilt = 0.0
+            if fase == "seguir" and tracking and not fault_ativo and gesto_t0 is None:
+                centrado = (erro is not None and abs(erro[0]) < par["zona"]
+                            and abs(erro[1]) < par["zona"])
+                parado = float(np.hypot(*rastreador.velocidade())) < par["vel_parado"]
+                pronto = (auto_estado == "seguindo" and ponto_cru is not None
+                          and centrado and parado and par["curioso_on"])
+                if curiosidade.update(agora, pronto, par["parado_s"], par["cooldown_s"]):
+                    curiosos = [t for t in GESTO_TIPOS if par["gestos"][t]["curioso"]]
+                    if curiosos:
+                        tocar_gesto_tipo(random.choice(curiosos))
+                        aviso(f"Curioso! {par['gesto_tipo']}", COR_VAL)
+                # respira só quando seguindo+presente (e o gesto não acabou de disparar)
+                if par["respirar_on"] and auto_estado == "seguindo" and gesto_t0 is None:
+                    rp, rt = respirar(agora, par["respirar_amp"])
+                    idle_pan, idle_tilt = np.radians(rp), np.radians(rt)
 
             # ---- GESTO (não-bloqueante). Corpo todo (roll/dtilt/dpan/dreach via pose IK)
             # ou só a cabeça (dq = offset DIRETO numa junta do punho). ----
@@ -720,8 +761,8 @@ def main():
 
             # ---- IK: mira (base_ik via base) → 6 juntas; o punho entra POR CIMA ----
             if fase == "seguir" and not fault_ativo:
-                q_ik, ok, ik_iters, ik_ms = resolver_ik(geom, base_ik + dpan,
-                                                        base_tilt + dtilt, q_ref,
+                q_ik, ok, ik_iters, ik_ms = resolver_ik(geom, base_ik + dpan + idle_pan,
+                                                        base_tilt + dtilt + idle_tilt, q_ref,
                                                         altura, roll, dreach)
                 if ok:
                     jump = float(np.degrees(np.max(np.abs(q_ik - q_ref))))
@@ -794,7 +835,7 @@ def main():
                 "tilt": round(float(np.degrees(base_tilt)), 1),
                 "altura_cm": round(altura * 100, 1),
                 "ik_ok": bool(ik_ok), "ik_ms": round(float(ik_ms), 1),
-                "auto": auto_estado, "fuga_on": perseguicao_on,
+                "auto": auto_estado, "fuga_on": par["procurar_on"],
                 "gesto_tipo": par["gesto_tipo"], "gesto_ativo": gesto_t0 is not None,
                 "sinais": [int(sinal_pan), int(sinal_tilt)],
                 "par": {k: v for k, v in par.items() if k != "gestos"},
@@ -851,9 +892,12 @@ def main():
                         (f"sinais x/y: {sinal_pan:+d}/{sinal_tilt:+d}   "
                          f"ESCALA: {np.radians(1)/radpx_x:.1f} / {np.radians(1)/radpx_y:.1f} px/deg",
                          COR_VAL),
-                        (f"fuga(u): {'ON ' if perseguicao_on else 'off'} estado: {auto_estado.upper()}"
+                        (f"procurar(u):{'ON' if par['procurar_on'] else 'off'} "
+                         f"curioso(m):{'ON' if par['curioso_on'] else 'off'} "
+                         f"respira:{'ON' if par['respirar_on'] else 'off'}  "
+                         f"estado: {auto_estado.upper()}"
                          + ((' -->' if auto_seta > 0 else ' <--') if auto_estado != "seguindo" else ""),
-                         COR_AVISO if auto_estado == "perseguindo" else COR_DIM),
+                         COR_AVISO if auto_estado in ("perseguindo", "varrendo") else COR_DIM),
                         (f"pescoco: +/-{par['neck_max']:.0f}deg  punho={np.degrees(neck):+.0f}  "
                          f"base={np.degrees(base_ik):+.0f}  sinal={par['sinal_neck']:+d}  "
                          f"desenrola={par['neck_relax']:.1f}", COR_VAL),
@@ -862,8 +906,8 @@ def main():
                          + ("  [tocando]" if gesto_t0 is not None else "")
                          + f"   1-7: {tipos_txt}",
                          COR_AVISO if gesto_t0 is not None else COR_VAL),
-                        ("TAB ajustes | ESPACO encara | k calibra | t pausa | u fuga | "
-                         "g/1-7 gesto | c recentra | n salva | f flutua | ESC",
+                        ("TAB ajustes | ESPACO encara | k calibra | t pausa | u procurar | "
+                         "m curioso | g/1-7 gesto | c recentra | n salva | f flutua | ESC",
                          COR_DIM),
                     ]
                 # web: frame com overlays geométricos, SEM o painel de texto (vira HTML)
@@ -934,11 +978,16 @@ def main():
             elif k == ord("c"):              # recentra o olhar na home (e zera a altura)
                 base_pan = base_tilt = 0.0
                 altura = 0.0
-            elif k == ord("u"):              # fuga/perseguição on/off
-                perseguicao_on = not perseguicao_on
+            elif k == ord("u"):              # procurar (fuga + varredura) on/off
+                par["procurar_on"] = not par["procurar_on"]
                 autonomia.reset()
-                aviso("Perseguicao ON (vai pro lado que voce sumiu)" if perseguicao_on
-                      else "Perseguicao OFF", COR_OK if perseguicao_on else COR_DIM)
+                aviso("Procurar ON (persegue + varre quando some)" if par["procurar_on"]
+                      else "Procurar OFF", COR_OK if par["procurar_on"] else COR_DIM)
+            elif k == ord("m"):              # curiosidade on/off (gesto sozinho parado)
+                par["curioso_on"] = not par["curioso_on"]
+                curiosidade.reset()
+                aviso("Curiosidade ON" if par["curioso_on"] else "Curiosidade OFF",
+                      COR_OK if par["curioso_on"] else COR_DIM)
             elif k == ord("g"):              # toca o gesto do tipo selecionado (config dele)
                 if fase == "seguir":
                     tocar_gesto_tipo(par["gesto_tipo"])

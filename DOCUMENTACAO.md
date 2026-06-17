@@ -688,8 +688,24 @@ cd web && npm install && npm run build && cd ..  # gera web/dist (precisa Node/n
 # no celular (mesmo wifi): http://IP-DO-PC:8000
 ```
 Sem o build (`web/dist`), o servidor mostra uma página de **fallback** com só o vídeo.
-Plano detalhado em [PLANO_PAINEL_WEB.md](PLANO_PAINEL_WEB.md). **Próximos ciclos:** todos
-os grupos de ajuste no painel, gráficos ao vivo, WebRTC, app nativo do celular.
+Plano detalhado em [PLANO_PAINEL_WEB.md](PLANO_PAINEL_WEB.md).
+
+**Painel (estado atual):** vídeo à esquerda (responsivo) + drawer à direita
+**redimensionável** (arraste a divisória → 1 a 4 colunas) e colapsável; **todos** os
+grupos da `AJUSTES_SPEC` (Tracking/Pescoço/Altura/Gestos/Comportamentos) gerados
+automaticamente com botões **−/+** (toggle/cycler), tooltips e sparkline do erro;
+**toasts** de feedback (some em 4s + ✕); botão **Salvar** verde.
+
+**Etapa 3 — comportamentos ("vida"), no `seguir_ik_web.py`** (o `seguir_ik.py` fica
+congelado; lógica em arquivos NOVOS): **curiosidade** (`vida.Curiosidade` + tecla `m`):
+parado+centralizado por alguns segundos → dispara um gesto aleatório entre os que têm
+`usa na curiosidade` ON, com cooldown; **varredura** (`autonomia_viva.py`, tecla `u` =
+procurar): sumiu → persegue o canto → **olha ao redor** (varre N ciclos) → ocioso →
+tenta de novo; **respirar** (`vida.respirar`): micro-movimento ocioso sobreposto à mira
+(a cabeça não vira estátua). Tudo ajustável no grupo **Comportamentos** do painel e salvo.
+
+**Próximos ciclos:** "humor/excitação" global (modula frequência/amplitude), gráficos
+ao vivo extras, WebRTC, app nativo do celular, lean/reach (pescoço que se estica).
 
 ---
 

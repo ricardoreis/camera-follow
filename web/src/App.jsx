@@ -32,7 +32,10 @@ function useEngine() {
 
 /* ─── helpers ─────────────────────────────────────────────────────────────── */
 const PANEL_MIN = 400
-const GRUPO_LABEL = { TRACKING: 'Tracking', PESCOCO: 'Pescoço', ALTURA: 'Altura', GESTOS: 'Gestos' }
+const GRUPO_LABEL = {
+  TRACKING: 'Tracking', PESCOCO: 'Pescoço', ALTURA: 'Altura',
+  GESTOS: 'Gestos', COMPORTAMENTOS: 'Comportamentos',
+}
 const HINTS = {
   ganho: 'Força da correção. Alto = rápido (pode quicar); baixo = suave e calmo.',
   zona: 'Raio central onde o braço NÃO se mexe (mata o tremor com você parado).',
@@ -52,6 +55,13 @@ const HINTS = {
   g_vel: 'Velocidade (tempo de subida) do gesto.',
   g_hold: 'Tempo segurando no ápice do gesto.',
   g_curioso: 'Se este gesto entra nas reações automáticas (curiosidade).',
+  procurar_on: 'Quando você some: persegue o canto e depois olha ao redor (varredura).',
+  curioso_on: 'Quando você fica parado, ele faz um gesto sozinho (curiosidade).',
+  parado_s: 'Quanto tempo parado/centralizado até disparar a curiosidade.',
+  cooldown_s: 'Intervalo mínimo entre reações automáticas.',
+  vel_parado: 'Abaixo desta velocidade (px/s) você é considerado "parado".',
+  respirar_on: 'Micro-movimento ocioso: a cabeça "respira" de leve (não vira estátua).',
+  respirar_amp: 'Intensidade do respiro (0 = parado/estátua).',
 }
 
 function fmtVal(v, fmt) {
