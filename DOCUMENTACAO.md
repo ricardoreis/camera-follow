@@ -694,7 +694,13 @@ Plano detalhado em [PLANO_PAINEL_WEB.md](PLANO_PAINEL_WEB.md).
 **redimensionável** (arraste a divisória → 1 a 4 colunas) e colapsável; **todos** os
 grupos da `AJUSTES_SPEC` (Tracking/Pescoço/Altura/Gestos/Comportamentos) gerados
 automaticamente com botões **−/+** (toggle/cycler), tooltips e sparkline do erro;
-**toasts** de feedback (some em 4s + ✕); botão **Salvar** verde.
+**toasts** de feedback (some em 4s + ✕); botão **Salvar** verde. Abaixo do vídeo, um
+**terminal de eventos** dark (timeline ao vivo do "cérebro": acordar/encarar/tracking/
+perdido/perseguindo/varrendo/ocioso/gesto/calibrar/salvar/pousar) alimentado por um log
+publicado no `/ws`. **Atalhos de teclado** na página (ESPAÇO/f/k/t/g/1‑7/u/m/c/z/n/ESC,
+iguais aos da janela cv2) + modal de **Ajuda** com a legenda. Botão **Stop** (e `ESC`)
+**pousa o braço e encerra**. O navegador **abre automaticamente** ao iniciar (a janela
+cv2 ainda abre em paralelo, como reserva — será removida quando formos "web-only").
 
 **Etapa 3 — comportamentos ("vida"), no `seguir_ik_web.py`** (o `seguir_ik.py` fica
 congelado; lógica em arquivos NOVOS): **curiosidade** (`vida.Curiosidade` + tecla `m`):
