@@ -104,7 +104,12 @@ def iniciar(spec=None, porta=8000):
     import uvicorn
 
     app = criar_app(spec)
-    config = uvicorn.Config(app, host="0.0.0.0", port=porta, log_level="warning")
+    # log_config=None: NÃO deixa o uvicorn reconfigurar o logging. O default dele
+    # instancia um formatter que chama sys.stdout.isatty() — e o nosso stdout é o
+    # Tee (diario.py), que não tem isatty(). Sem o log_config, evitamos esse crash
+    # (e não mexemos no diario.py). access_log=False reduz ruído no terminal.
+    config = uvicorn.Config(app, host="0.0.0.0", port=porta,
+                            log_config=None, access_log=False)
     server = uvicorn.Server(config)
 
     th = threading.Thread(target=server.run, daemon=True, name="servidor_web")
