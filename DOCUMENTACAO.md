@@ -651,4 +651,46 @@ suavização (One Euro), predição (Kalman) e auto-calibração — que ele nã
 
 ---
 
+## 17. Painel Web interativo (engine ⇄ interface)
+
+Interface no **navegador** (desktop **e** celular pela rede), separando o **cérebro**
+(engine) da **interface**. Construído **lado a lado**, sem tocar no `seguir_ik.py` (que
+fica como reserva): o `seguir_ik_web.py` é uma **cópia** que também sobe o servidor.
+
+**Arquitetura (1 processo, várias threads):**
+- **Thread A** — controle do braço MIT 500Hz (`controle_braco.controlador`).
+- **Thread B** — laço de visão/IK (~30fps): além do que já fazia, **publica** o frame
+  anotado + o estado público e **drena a fila** de comandos da web (aplica via
+  `aplicar_comando`, na própria thread → sem corrida).
+- **Thread C** — servidor `servidor_web.py` (FastAPI/uvicorn, daemon):
+  `GET /` (React build), `GET /video` (MJPEG), `WS /ws` (estado ~12Hz + comandos),
+  `GET /api/spec` (a `AJUSTES_SPEC` p/ o front montar controles).
+
+**Segurança:** o engine é **autônomo**. O servidor só **lê** (vídeo/estado) e **empilha**
+comandos; quem comanda o braço é só o laço do engine. Se o navegador cair, o braço
+**continua** seguindo. No MVP a web só faz ações sem risco (tracking/ganho/gestos);
+calibrar/flutuar seguem no teclado.
+
+**Arquivos novos:** `engine_estado.py` (estado/frame + fila thread-safe, singleton
+`ESTADO`), `servidor_web.py` (FastAPI), `seguir_ik_web.py` (cópia do `seguir_ik` + hooks),
+`web/` (React + Tailwind via **Vite**: `src/App.jsx` = vídeo + estado + tracking/ganho/
+gestos; hook `useEngine` no websocket com reconexão).
+
+**Vídeo + overlays:** o MJPEG manda o frame com os **overlays geométricos** (caixa da
+face, zona morta, mira, trajetória) — só o **painel de TEXTO** não vai no vídeo (vira
+widget HTML). Refino futuro: vídeo "limpo" + coords no `/ws` e desenhar no navegador.
+
+**Como rodar:**
+```bash
+.venv/bin/pip install -r requirements.txt        # inclui fastapi + uvicorn
+cd web && npm install && npm run build && cd ..  # gera web/dist (precisa Node/npm)
+.venv/bin/python seguir_ik_web.py                # cv2 normal + http://localhost:8000
+# no celular (mesmo wifi): http://IP-DO-PC:8000
+```
+Sem o build (`web/dist`), o servidor mostra uma página de **fallback** com só o vídeo.
+Plano detalhado em [PLANO_PAINEL_WEB.md](PLANO_PAINEL_WEB.md). **Próximos ciclos:** todos
+os grupos de ajuste no painel, gráficos ao vivo, WebRTC, app nativo do celular.
+
+---
+
 *Documento vivo — atualizado conforme o projeto evolui.*

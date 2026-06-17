@@ -8,3 +8,8 @@ numpy==2.4.6
 motorbridge>=0.1.7   # ponte serial<->CAN (MotorBridge em /dev/ttyACM0)
 pyyaml>=6.0          # lê o config/arm.yaml
 pin>=3.9.0           # pinocchio (cinemática); puxado pelo __init__ do pacote
+
+# Painel web (seguir_ik_web.py) — servidor FastAPI + websocket + vídeo MJPEG.
+# O front (React+Tailwind) fica em web/ e precisa de Node/npm: npm install && npm run build
+fastapi>=0.110            # servidor web (rotas /video, /ws, serve o build do React)
+uvicorn[standard]>=0.29   # ASGI server (roda o FastAPI numa thread daemon)

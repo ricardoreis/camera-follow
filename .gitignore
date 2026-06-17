@@ -19,6 +19,10 @@ log_*.csv
 # Logs detalhados da Etapa 1 (IK)
 logs_ik/
 
+# Painel web (build/deps gerados — rode `npm install && npm run build` em web/)
+web/node_modules/
+web/dist/
+
 # Editores / SO
 .vscode/
 .idea/
