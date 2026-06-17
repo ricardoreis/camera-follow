@@ -365,6 +365,10 @@ def main():
             tipo, chave, val = cmd.get("tipo"), cmd.get("chave"), cmd.get("val")
             if tipo in par["gestos"] and chave in par["gestos"][tipo]:
                 par["gestos"][tipo][chave] = val
+        elif c == "nudge":                        # -/+ no item da spec (reusa a logica do cv2)
+            sel = cmd.get("sel")
+            if isinstance(sel, int) and 0 <= sel < len(AJUSTES_SPEC):
+                ajustar_item(par, sel, 1 if cmd.get("d", 1) >= 0 else -1)
         elif c == "gesto":                        # toca um gesto pelo tipo
             if fase == "seguir" and cmd.get("tipo") in GESTO_TIPOS:
                 tocar_gesto_tipo(cmd["tipo"])

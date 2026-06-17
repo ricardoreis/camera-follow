@@ -1,27 +1,22 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 
-// Hook: conecta no websocket do engine, recebe o ESTADO e expõe enviar(cmd).
-// Reconecta sozinho se cair. Em dev o Vite faz proxy de /ws -> :8000.
+/* ─── conexão com o engine (websocket + spec) ─────────────────────────────── */
 function useEngine() {
   const [estado, setEstado] = useState(null)
+  const [spec, setSpec] = useState([])
   const [conectado, setConectado] = useState(false)
   const wsRef = useRef(null)
 
   useEffect(() => {
-    let vivo = true
-    let timer = null
+    fetch('/api/spec').then((r) => r.json()).then(setSpec).catch(() => {})
+    let vivo = true, timer = null
     const conectar = () => {
       const proto = location.protocol === 'https:' ? 'wss' : 'ws'
       const ws = new WebSocket(`${proto}://${location.host}/ws`)
       wsRef.current = ws
       ws.onopen = () => setConectado(true)
-      ws.onclose = () => {
-        setConectado(false)
-        if (vivo) timer = setTimeout(conectar, 1000) // reconecta
-      }
-      ws.onmessage = (ev) => {
-        try { setEstado(JSON.parse(ev.data)) } catch {}
-      }
+      ws.onclose = () => { setConectado(false); if (vivo) timer = setTimeout(conectar, 1000) }
+      ws.onmessage = (ev) => { try { setEstado(JSON.parse(ev.data)) } catch {} }
     }
     conectar()
     return () => { vivo = false; clearTimeout(timer); wsRef.current?.close() }
@@ -32,115 +27,275 @@ function useEngine() {
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(cmd))
   }, [])
 
-  return { estado, conectado, enviar }
+  return { estado, spec, conectado, enviar }
 }
 
-function Chip({ label, value, ok }) {
-  const cor = ok === true ? 'text-emerald-400' : ok === false ? 'text-rose-400' : 'text-sky-300'
+/* ─── helpers ─────────────────────────────────────────────────────────────── */
+const GRUPO_LABEL = { TRACKING: 'Tracking', PESCOCO: 'Pescoço', ALTURA: 'Altura', GESTOS: 'Gestos' }
+const HINTS = {
+  ganho: 'Força da correção. Alto = rápido (pode quicar); baixo = suave e calmo.',
+  zona: 'Raio central onde o braço NÃO se mexe (mata o tremor com você parado).',
+  limite: 'Quanto o pan pode girar a partir do centro.',
+  limite_tilt: 'Quanto o tilt pode inclinar a partir do centro.',
+  previsao: 'Mira X ms à frente para compensar a latência.',
+  max_step: 'Passo máximo da mira por frame (suavidade).',
+  neck_max: 'Quanto o PUNHO paneia antes da BASE entrar (pescoço).',
+  neck_relax: 'Velocidade do "desenrolar": a cabeça endireita e o corpo compensa.',
+  sinal_neck: 'Sentido do pescoço (inverta se virar para o lado errado).',
+  altura_on: 'Sobe/desce o braço para manter você na altura dos olhos.',
+  alt_max: 'Alcance vertical do acompanhamento de altura.',
+  altura_ganho: 'Velocidade do sobe/desce da altura.',
+  altura_zona: 'Tilt mínimo (sustentado) para começar a subir/descer.',
+  gesto_tipo: 'Gesto selecionado para editar/testar (cada um tem a sua config).',
+  g_amp: 'Amplitude do gesto selecionado.',
+  g_vel: 'Velocidade (tempo de subida) do gesto.',
+  g_hold: 'Tempo segurando no ápice do gesto.',
+  g_curioso: 'Se este gesto entra nas reações automáticas (curiosidade).',
+}
+
+function fmtVal(v, fmt) {
+  if (v === undefined || v === null) return '—'
+  switch (fmt) {
+    case 'bool': return v ? 'ON' : 'off'
+    case 'sinal': return (v >= 0 ? '+' : '') + v
+    case 'px': return `${Math.round(v)} px`
+    case 'ms': return `${Math.round(v)} ms`
+    case 'deg': return `${Math.round(v)}°`
+    case 'degf1': return `${Number(v).toFixed(1)}°`
+    case 'cm': return `${Math.round(v * 100)} cm`
+    case 'f1ps': return `${Number(v).toFixed(1)}/s`
+    case 'f2': return Number(v).toFixed(2)
+    case 'f2s': return `${Number(v).toFixed(2)}s`
+    case 'f1s': return `${Number(v).toFixed(1)}s`
+    case 'tipo': return String(v)
+    default: return Number(v).toFixed(2)
+  }
+}
+function valorDe(item, e) {
+  if (!e) return undefined
+  if (item.chave.startsWith('g_')) return e.gestos?.[e.par?.gesto_tipo]?.[item.chave.slice(2)]
+  return e.par?.[item.chave]
+}
+
+/* ─── componentes ─────────────────────────────────────────────────────────── */
+function Secao({ titulo, children, extra }) {
   return (
-    <div className="rounded-lg bg-slate-800/60 px-3 py-2 ring-1 ring-slate-700">
-      <div className="text-[10px] uppercase tracking-wide text-slate-400">{label}</div>
+    <section>
+      <div className="mb-2 flex items-center justify-between">
+        <h3 className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">{titulo}</h3>
+        {extra}
+      </div>
+      {children}
+    </section>
+  )
+}
+
+function Metric({ label, value, ok }) {
+  const cor = ok === true ? 'text-emerald-600' : ok === false ? 'text-rose-500' : 'text-gray-800'
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white px-3 py-2">
+      <div className="text-[11px] text-gray-400">{label}</div>
       <div className={`text-sm font-semibold ${cor}`}>{value}</div>
     </div>
   )
 }
 
+function MiniBtn({ children, onClick, title }) {
+  return (
+    <button onClick={onClick} title={title}
+      className="flex h-8 w-8 items-center justify-center rounded-lg border border-gray-300 bg-white
+                 text-lg font-semibold text-gray-700 hover:bg-gray-100 active:scale-95">
+      {children}
+    </button>
+  )
+}
+
+function ParRow({ item, e, enviar }) {
+  const v = valorDe(item, e)
+  const nudge = (d) => enviar({ cmd: 'nudge', sel: item.sel, d })
+  let controle
+  if (item.fmt === 'bool') {
+    const on = !!v
+    controle = (
+      <button onClick={() => nudge(1)}
+        className={`relative h-6 w-11 rounded-full transition ${on ? 'bg-emerald-500' : 'bg-gray-300'}`}>
+        <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition ${on ? 'left-[22px]' : 'left-0.5'}`} />
+      </button>
+    )
+  } else if (item.fmt === 'tipo') {
+    controle = (
+      <div className="flex items-center gap-2">
+        <MiniBtn onClick={() => nudge(-1)} title="anterior">‹</MiniBtn>
+        <span className="w-20 text-center text-sm font-semibold capitalize text-gray-800">{fmtVal(v, item.fmt)}</span>
+        <MiniBtn onClick={() => nudge(1)} title="próximo">›</MiniBtn>
+      </div>
+    )
+  } else {
+    controle = (
+      <div className="flex items-center gap-2">
+        <MiniBtn onClick={() => nudge(-1)} title="diminuir">−</MiniBtn>
+        <span className="w-16 text-center text-sm font-semibold tabular-nums text-gray-800">{fmtVal(v, item.fmt)}</span>
+        <MiniBtn onClick={() => nudge(1)} title="aumentar">+</MiniBtn>
+      </div>
+    )
+  }
+  return (
+    <div className="flex items-center justify-between py-1.5">
+      <span className="text-sm text-gray-600" title={HINTS[item.chave] || ''}>
+        {item.label}
+        {HINTS[item.chave] && <span className="ml-1 cursor-help text-gray-300">ⓘ</span>}
+      </span>
+      {controle}
+    </div>
+  )
+}
+
+function Sparkline({ data }) {
+  const W = 320, H = 40
+  if (!data.length) return <div style={{ height: H }} />
+  const max = Math.max(30, ...data)
+  const pts = data.map((v, i) => `${(i / (data.length - 1 || 1)) * W},${H - (v / max) * H}`).join(' ')
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="h-10 w-full">
+      <polyline points={pts} fill="none" stroke="#6366f1" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+    </svg>
+  )
+}
+
+/* ─── app ─────────────────────────────────────────────────────────────────── */
 export default function App() {
-  const { estado, conectado, enviar } = useEngine()
+  const { estado, spec, conectado, enviar } = useEngine()
   const e = estado || {}
+  const [aberto, setAberto] = useState(true)
+  const [hist, setHist] = useState([])
+
+  useEffect(() => {
+    if (!estado) return
+    const mag = estado.erro ? Math.hypot(estado.erro[0], estado.erro[1]) : 0
+    setHist((h) => [...h.slice(-59), mag])
+  }, [estado])
+
+  const grupos = useMemo(() => {
+    const m = {}
+    spec.forEach((it, i) => { (m[it.grupo] ??= []).push({ ...it, sel: i }) })
+    return m
+  }, [spec])
+
   const tracking = !!e.tracking
-  const ganho = e.par?.ganho ?? 0.08
-  const tipos = e.tipos || ['single', 'swing', 'sim', 'nao', 'feliz', 'dancar', 'espreitar']
+  const tipos = e.tipos || []
 
   return (
-    <div className="min-h-full text-slate-100">
+    <div className="flex h-screen flex-col bg-gray-100 text-gray-900">
       {/* Cabeçalho */}
-      <header className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
-        <h1 className="text-lg font-bold tracking-tight">
-          🦾 Camera&nbsp;Follow <span className="text-slate-500 font-normal">— painel</span>
-        </h1>
-        <span className={`flex items-center gap-2 text-xs ${conectado ? 'text-emerald-400' : 'text-rose-400'}`}>
-          <span className={`h-2 w-2 rounded-full ${conectado ? 'bg-emerald-400' : 'bg-rose-400'}`} />
-          {conectado ? 'conectado' : 'reconectando…'}
-        </span>
+      <header className="flex items-center justify-between border-b border-gray-200 bg-white px-5 py-3">
+        <div className="flex items-baseline gap-2">
+          <span className="text-xl">🦾</span>
+          <h1 className="text-lg font-semibold tracking-tight">Camera Follow</h1>
+          <span className="text-sm text-gray-400">painel de controle</span>
+        </div>
+        <div className="flex items-center gap-4">
+          <span className={`flex items-center gap-2 text-xs ${conectado ? 'text-emerald-600' : 'text-rose-500'}`}>
+            <span className={`h-2 w-2 rounded-full ${conectado ? 'bg-emerald-500' : 'bg-rose-500'}`} />
+            {conectado ? 'conectado' : 'reconectando…'}
+          </span>
+          <button onClick={() => setAberto((a) => !a)}
+            className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50">
+            {aberto ? 'Ocultar painel ›' : '‹ Mostrar painel'}
+          </button>
+        </div>
       </header>
 
-      <main className="mx-auto max-w-3xl space-y-4 p-4">
-        {/* Vídeo ao vivo (MJPEG) */}
-        <div className="overflow-hidden rounded-2xl bg-black ring-1 ring-slate-800">
-          <img src="/video" alt="vídeo ao vivo" className="w-full object-contain" />
-        </div>
+      <div className="flex flex-1 overflow-hidden">
+        {/* Vídeo (esquerda, centralizado, responsivo) */}
+        <main className="flex min-w-0 flex-1 items-center justify-center p-6">
+          <img src="/video" alt="vídeo ao vivo"
+            className="max-h-full max-w-full rounded-2xl bg-black object-contain shadow-lg ring-1 ring-gray-200" />
+        </main>
 
-        {/* Estado */}
-        <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
-          <Chip label="fase" value={e.fase ?? '—'} />
-          <Chip label="tracking" value={tracking ? 'ON' : 'off'} ok={tracking} />
-          <Chip label="calibrado" value={e.calibrado ? 'OK' : 'não'} ok={!!e.calibrado} />
-          <Chip label="rosto" value={e.tem_rosto ? 'sim' : 'não'} ok={!!e.tem_rosto} />
-          <Chip label="erro px" value={e.erro ? `${e.erro[0]},${e.erro[1]}` : '—'} />
-          <Chip label="IK" value={e.ik_ok ? `${e.ik_ms}ms` : 'rev'} ok={e.ik_ok} />
-        </div>
-
-        {/* Controles */}
-        <div className="space-y-4 rounded-2xl bg-slate-900/60 p-4 ring-1 ring-slate-800">
-          {/* Tracking */}
-          <div className="flex items-center justify-between gap-3">
-            <span className="font-medium">Tracking</span>
-            <button
-              onClick={() => enviar({ cmd: 'tracking', val: !tracking })}
-              className={`rounded-xl px-5 py-2 font-semibold transition ${
-                tracking ? 'bg-emerald-500 text-emerald-950 hover:bg-emerald-400'
-                         : 'bg-slate-700 hover:bg-slate-600'}`}>
-              {tracking ? 'ON' : 'OFF'}
-            </button>
-          </div>
-
-          {/* Ganho */}
-          <div>
-            <div className="mb-1 flex justify-between text-sm">
-              <span className="font-medium">Ganho</span>
-              <span className="tabular-nums text-sky-300">{Number(ganho).toFixed(2)}</span>
+        {/* Painel (direita) — drawer colapsável com rolagem */}
+        <aside className={`shrink-0 overflow-hidden border-l border-gray-200 bg-white transition-[width] duration-300 ease-in-out
+                           ${aberto ? 'w-[400px]' : 'w-0'}`}>
+          <div className="flex h-full w-[400px] flex-col">
+            <div className="flex items-center justify-between border-b border-gray-100 px-5 py-3">
+              <span className="text-sm font-semibold text-gray-700">Controles</span>
+              <button onClick={() => setAberto(false)} title="fechar"
+                className="flex h-7 w-7 items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100 hover:text-gray-700">✕</button>
             </div>
-            <input
-              type="range" min="0" max="1" step="0.02" value={ganho}
-              onChange={(ev) => enviar({ cmd: 'set_par', chave: 'ganho', val: Number(ev.target.value) })}
-              className="w-full accent-sky-400"
-            />
-          </div>
 
-          {/* Gestos */}
-          <div>
-            <div className="mb-2 text-sm font-medium">Gestos</div>
-            <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
-              {tipos.map((t, i) => (
-                <button key={t}
-                  onClick={() => enviar({ cmd: 'gesto', tipo: t })}
-                  className="rounded-xl bg-indigo-600/80 px-2 py-3 text-sm font-semibold capitalize
-                             ring-1 ring-indigo-500/40 transition hover:bg-indigo-500 active:scale-95">
-                  <span className="block text-[10px] text-indigo-200/70">{i + 1}</span>{t}
-                </button>
+            <div className="flex-1 space-y-6 overflow-y-auto px-5 py-4">
+              {/* Tracking */}
+              <Secao titulo="Controle">
+                <div className="flex items-center justify-between rounded-xl border border-gray-200 bg-white px-4 py-3">
+                  <div>
+                    <div className="font-medium">Tracking</div>
+                    {!e.calibrado && <div className="text-xs text-amber-600">calibre no teclado (k) p/ ativar</div>}
+                  </div>
+                  <button onClick={() => enviar({ cmd: 'tracking', val: !tracking })}
+                    className={`rounded-xl px-5 py-2 font-semibold transition ${tracking
+                      ? 'bg-emerald-500 text-white hover:bg-emerald-400'
+                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}>
+                    {tracking ? 'ON' : 'OFF'}
+                  </button>
+                </div>
+              </Secao>
+
+              {/* Detecção */}
+              <Secao titulo="Detecção">
+                <div className="grid grid-cols-2 gap-2">
+                  <Metric label="Status" value={e.tem_rosto ? 'Detectado' : '—'} ok={e.tem_rosto} />
+                  <Metric label="Fase" value={e.fase ?? '—'} />
+                  <Metric label="Pan / Tilt" value={`${e.pan ?? 0}° / ${e.tilt ?? 0}°`} />
+                  <Metric label="IK" value={e.ik_ok ? `${e.ik_ms} ms` : 'revertido'} ok={e.ik_ok} />
+                </div>
+                <div className="mt-2 rounded-xl border border-gray-200 bg-white px-3 py-2">
+                  <div className="mb-1 flex justify-between text-[11px] text-gray-400">
+                    <span>erro (px)</span><span>{e.erro ? `${e.erro[0]}, ${e.erro[1]}` : '—'}</span>
+                  </div>
+                  <Sparkline data={hist} />
+                </div>
+              </Secao>
+
+              {/* Tocar gesto */}
+              {tipos.length > 0 && (
+                <Secao titulo="Tocar gesto">
+                  <div className="grid grid-cols-3 gap-2">
+                    {tipos.map((t, i) => (
+                      <button key={t} onClick={() => enviar({ cmd: 'gesto', tipo: t })}
+                        className={`rounded-xl border px-2 py-2 text-sm font-medium capitalize transition active:scale-95
+                          ${e.par?.gesto_tipo === t
+                            ? 'border-indigo-300 bg-indigo-50 text-indigo-700'
+                            : 'border-gray-200 bg-white text-gray-700 hover:bg-gray-50'}`}>
+                        <span className="mr-1 text-[10px] text-gray-400">{i + 1}</span>{t}
+                      </button>
+                    ))}
+                  </div>
+                </Secao>
+              )}
+
+              {/* Ajustes (gerados da AJUSTES_SPEC) */}
+              {Object.entries(grupos).map(([g, itens]) => (
+                <Secao key={g} titulo={`Ajustes · ${GRUPO_LABEL[g] || g}`}>
+                  <div className="divide-y divide-gray-100 rounded-xl border border-gray-200 bg-white px-4">
+                    {itens.map((it) => <ParRow key={it.chave} item={it} e={e} enviar={enviar} />)}
+                  </div>
+                </Secao>
               ))}
             </div>
-          </div>
 
-          {/* Ações */}
-          <div className="flex gap-2 pt-1">
-            <button onClick={() => enviar({ cmd: 'recentra' })}
-              className="flex-1 rounded-xl bg-slate-700 px-3 py-2 font-medium hover:bg-slate-600">
-              Recentrar
-            </button>
-            <button onClick={() => enviar({ cmd: 'salvar' })}
-              className="flex-1 rounded-xl bg-amber-500/90 px-3 py-2 font-semibold text-amber-950 hover:bg-amber-400">
-              Salvar config
-            </button>
+            {/* Ações (fixas no rodapé) */}
+            <div className="flex gap-2 border-t border-gray-100 px-5 py-3">
+              <button onClick={() => enviar({ cmd: 'recentra' })}
+                className="flex-1 rounded-xl border border-gray-300 bg-white px-3 py-2 font-medium text-gray-700 hover:bg-gray-50">
+                Recentrar
+              </button>
+              <button onClick={() => enviar({ cmd: 'salvar' })}
+                className="flex-1 rounded-xl bg-emerald-600 px-3 py-2 font-semibold text-white hover:bg-emerald-500">
+                Salvar config
+              </button>
+            </div>
           </div>
-        </div>
-
-        <p className="pb-6 text-center text-xs text-slate-500">
-          O braço é autônomo — este painel é um controle remoto. A janela do PC (cv2/teclado)
-          segue funcionando em paralelo.
-        </p>
-      </main>
+        </aside>
+      </div>
     </div>
   )
 }
