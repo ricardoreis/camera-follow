@@ -65,14 +65,15 @@ def sinal_altura_de(geom):
     return 1.0 if dz > 0 else -1.0
 
 
-def resolver_ik(geom, pan, tilt, q_seed, altura=0.0, roll=0.0):
-    """Mira (pan, tilt) em rad + 'altura' (m) + 'roll' (rad, head-tilt) → pose SE(3).
+def resolver_ik(geom, pan, tilt, q_seed, altura=0.0, roll=0.0, reach=0.0):
+    """Mira (pan, tilt) em rad + 'altura' (m) + 'roll' (rad) + 'reach' (m) → pose SE(3).
 
         R_alvo = Rz_world(pan) · R0 · Ry_body(tilt) · Rx_optico(roll)
-        p_alvo = Rz_world(pan) · p0 + [0, 0, altura]
+        p_alvo = Rz_world(pan) · p0 + [0, 0, altura] + reach · (Rz · eixo_optico)
 
     O 'roll' é uma rotação no EIXO ÓPTICO (head-tilt: inclina a cabeça pro ombro sem
-    parar de encarar — vira o joint6). Devolve (q, ok, iters, ms)."""
+    parar de encarar — vira o joint6). O 'reach' translada a câmera PRA FRENTE no eixo
+    óptico (gesto "espreitar": chega o rosto mais perto). Devolve (q, ok, iters, ms)."""
     p0, R0, c, r, opt = geom
     Rz = pin.AngleAxis(pan, np.array([0.0, 0.0, 1.0])).matrix()   # giro na base (mundo Z)
     eixo_tilt = R0[:, TILT_BODY_COL]                              # eixo Y do corpo
@@ -82,6 +83,8 @@ def resolver_ik(geom, pan, tilt, q_seed, altura=0.0, roll=0.0):
         R = R @ pin.AngleAxis(roll, np.array([1.0, 0.0, 0.0])).matrix()
     p = Rz @ p0
     p = p + np.array([0.0, 0.0, altura])                         # acompanha a altura
+    if reach != 0.0:                                            # chega perto no eixo óptico
+        p = p + reach * (Rz @ opt)
     alvo = pos_rot_to_se3(p, R)
     t0 = time.perf_counter()
     res = solve_ik(_model, _data, _ee_id, alvo, q_seed.copy(), IK_RT)

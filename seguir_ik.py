@@ -44,7 +44,7 @@ from ui_hud import (  # noqa: E402
 )
 from diario import Diario, Tee  # noqa: E402
 from autonomia import Autonomia  # noqa: E402
-from gestos import perfil_head_tilt, HEAD_TILT_DEG  # noqa: E402
+from gestos import aplicar_gesto, GESTO_TIPOS, HT_DESCE  # noqa: E402
 
 import camera  # noqa: E402
 from detector import DetectorFaces  # noqa: E402
@@ -87,9 +87,22 @@ JANELA_W, JANELA_H = 1600, 900
 DUR_REPOUSO = 3.5
 DUR_ACORDAR = 3.0
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs_ik")
-# Config (home + repouso + calibração + ajustes), salva com 'n' — gitignored.
+# Config (home + repouso + calibração + ajustes + config por gesto), salva com 'n'.
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "config_seguir_ik.json")
+
+
+# Config PADRÃO de cada gesto (amp graus, vel/hold s, curioso=entra na curiosidade).
+# Cada TIPO guarda a SUA config — editar um não mexe nos outros.
+GESTO_DEF = {
+    "single":    {"amp": 25.0, "vel": 0.30, "hold": 0.9,  "curioso": True},
+    "swing":     {"amp": 22.0, "vel": 0.25, "hold": 0.4,  "curioso": True},
+    "sim":       {"amp": 12.0, "vel": 0.22, "hold": 0.15, "curioso": True},
+    "nao":       {"amp": 14.0, "vel": 0.22, "hold": 0.15, "curioso": False},
+    "feliz":     {"amp": 10.0, "vel": 0.18, "hold": 0.10, "curioso": True},
+    "dancar":    {"amp": 12.0, "vel": 0.22, "hold": 0.10, "curioso": False},
+    "espreitar": {"amp": 25.0, "vel": 0.50, "hold": 0.70, "curioso": True},
+}
 
 
 def par_default():
@@ -101,6 +114,8 @@ def par_default():
         "neck_max": NECK_MAX_DEG, "neck_relax": NECK_RELAX, "sinal_neck": -1,
         "altura_on": True, "alt_max": ALTURA_MAX_DEFAULT,
         "altura_ganho": ALTURA_GANHO, "altura_zona": ALTURA_ZONA_DEG,
+        "gesto_tipo": "single",
+        "gestos": {t: dict(d) for t, d in GESTO_DEF.items()},   # config POR gesto
     }
 
 
@@ -120,7 +135,27 @@ AJUSTES_SPEC = [
     ("ALTURA",   "alt_max",      "alcance",          0.02, 0.0,  0.30,  "cm"),
     ("ALTURA",   "altura_ganho", "ganho subida",     0.05, 0.0,   1.0,  "f2"),
     ("ALTURA",   "altura_zona",  "tilt min p/ subir", 1.0, 0.0,  20.0,  "deg"),
+    ("GESTOS",   "gesto_tipo",   "tipo (1-7 toca)",     0,   0,     0,  "tipo"),
+    ("GESTOS",   "g_amp",        "amplitude",         5.0, 5.0,  90.0,  "deg"),
+    ("GESTOS",   "g_vel",        "velocidade",       0.05, 0.10,  1.50, "f2s"),
+    ("GESTOS",   "g_hold",       "hold",              0.1, 0.0,   4.0,  "f1s"),
+    ("GESTOS",   "g_curioso",    "usa na curiosidade",  0,   0,     1,  "bool"),
 ]
+
+
+def _par_get(par, chave):
+    """Lê um valor do painel. Chaves 'g_*' são POR gesto (do tipo selecionado)."""
+    if chave.startswith("g_"):
+        return par["gestos"][par["gesto_tipo"]][chave[2:]]
+    return par[chave]
+
+
+def _par_set(par, chave, v):
+    """Grava um valor do painel. Chaves 'g_*' vão pro gesto do tipo selecionado."""
+    if chave.startswith("g_"):
+        par["gestos"][par["gesto_tipo"]][chave[2:]] = v
+    else:
+        par[chave] = v
 
 
 def _fmt_val(v, fmt):
@@ -135,6 +170,9 @@ def _fmt_val(v, fmt):
         "cm": lambda: f"{v * 100:.0f} cm",
         "f1ps": lambda: f"{v:.1f}/s",
         "f2": lambda: f"{v:.2f}",
+        "f2s": lambda: f"{v:.2f}s",
+        "f1s": lambda: f"{v:.1f}s",
+        "tipo": lambda: str(v),
     }.get(fmt, lambda: f"{v:.2f}")()
 
 
@@ -150,20 +188,24 @@ def linhas_ajustes(par, sel):
             grupo = g
         marca = ">" if i == sel else " "
         cor = COR_OK if i == sel else COR_VAL
-        linhas.append((f" {marca} {lbl:<16}{_fmt_val(par[chave], fmt)}", cor))
+        linhas.append((f" {marca} {lbl:<19}{_fmt_val(_par_get(par, chave), fmt)}", cor))
     return linhas
 
 
 def ajustar_item(par, sel, d):
-    """Aplica +/- d*passo ao item selecionado (ou alterna bool/sinal)."""
+    """Aplica +/- d*passo ao item selecionado (ou alterna bool/sinal/tipo)."""
     _g, chave, _lbl, passo, mn, mx, fmt = AJUSTES_SPEC[sel]
+    cur = _par_get(par, chave)
     if fmt == "bool":
-        par[chave] = not par[chave]
+        _par_set(par, chave, not cur)
     elif fmt == "sinal":
-        par[chave] = -int(par[chave])
+        _par_set(par, chave, -int(cur))
+    elif fmt == "tipo":                      # cicla os tipos de gesto
+        i = GESTO_TIPOS.index(cur) if cur in GESTO_TIPOS else 0
+        _par_set(par, chave, GESTO_TIPOS[(i + (1 if d > 0 else -1)) % len(GESTO_TIPOS)])
     else:
-        v = min(mx, max(mn, par[chave] + d * passo))
-        par[chave] = int(round(v)) if fmt == "px" else round(float(v), 4)
+        v = min(mx, max(mn, cur + d * passo))
+        _par_set(par, chave, int(round(v)) if fmt == "px" else round(float(v), 4))
 
 
 def salvar_config_ik(repouso, home, sinal_pan, sinal_tilt, radpx_x, radpx_y, par):
@@ -187,7 +229,11 @@ def par_de_cfg(cfg):
     """Lê o `par` salvo (defaults p/ chaves novas). Compat com config antigo (chaves planas)."""
     par = par_default()
     if isinstance(cfg.get("par"), dict):
-        par.update(cfg["par"])
+        salvos = dict(cfg["par"])
+        salvos.pop("gestos", None)          # 'gestos' é mesclado à parte (garante todos os tipos)
+        par.update(salvos)
+        gsalvos = cfg["par"].get("gestos", {})
+        par["gestos"] = {t: {**GESTO_DEF[t], **gsalvos.get(t, {})} for t in GESTO_TIPOS}
     else:                                   # config antigo: chaves planas → mapeia
         mapa = {"ganho": "kp_servo", "zona": "deadzone_px", "limite": "limite_deg",
                 "previsao": "previsao_ms", "alt_max": "alt_max", "altura_on": "altura_on",
@@ -248,8 +294,10 @@ def main():
     auto_estado = "seguindo"   # seguindo | perseguindo | esperando
     auto_seta = 0.0            # direção da saída (p/ HUD)
     autonomia = Autonomia(max_step)
-    gesto_t0 = None            # 'g': head-tilt em andamento (None = nenhum)
-    gesto_dir = 1              # alterna o lado a cada disparo
+    gesto_t0 = None            # gesto em andamento (None = nenhum); 'g'/1..7 disparam
+    gesto_dir = 1              # alterna o lado a cada disparo (single)
+    gesto_tipo = "single"      # tipo do gesto em andamento
+    gesto_params = {}          # snapshot dos params (amp/sobe/segura/dir) do disparo
     q_ref = None               # seed da IK SEM o pescoço (não contamina o warm-start)
     neck = 0.0                 # pan atual do punho (rad), p/ HUD/log
     pan_base = 0.0             # parte do pan que a BASE assume (lenta; desenrola o punho)
@@ -273,6 +321,21 @@ def main():
             aviso("Config salva! Proxima vez ele acorda e segue sozinho.", COR_OK)
         else:
             aviso("Trave a home (ESPACO) e calibre (k) antes de salvar", COR_AVISO)
+
+    def tocar_gesto(tipo, amp, vel, hold):
+        """Dispara um gesto (tipo + params). O loop o aplica até terminar."""
+        nonlocal gesto_t0, gesto_dir, gesto_tipo, gesto_params
+        gesto_dir = -gesto_dir          # alterna o lado (single)
+        gesto_tipo = tipo
+        gesto_params = {"amp": amp, "sobe": vel, "segura": hold, "desce": HT_DESCE,
+                        "dir": gesto_dir}
+        gesto_t0 = time.time()
+
+    def tocar_gesto_tipo(tipo):
+        """Seleciona um tipo e dispara com a config DELE (cada gesto tem a sua)."""
+        gp = par["gestos"][tipo]
+        par["gesto_tipo"] = tipo
+        tocar_gesto(tipo, gp["amp"], gp["vel"], gp["hold"])
 
     diario.config(modelo="ponto_fixo", sinais=[sinal_pan, sinal_tilt], ganho=par["ganho"],
                   deadzone_px=par["zona"], limite_deg=par["limite"], previsao_ms=par["previsao"],
@@ -573,14 +636,20 @@ def main():
             else:
                 auto_estado = "seguindo"
 
-            # ---- HEAD-TILT: roll no eixo óptico (não-bloqueante) ----
-            roll = 0.0
+            # ---- GESTO (não-bloqueante). Corpo todo (roll/dtilt/dpan/dreach via pose IK)
+            # ou só a cabeça (dq = offset DIRETO numa junta do punho). ----
+            roll = dtilt = dpan = dreach = 0.0
+            dq = {}
             if gesto_t0 is not None:
-                p_ht = perfil_head_tilt(time.time() - gesto_t0)
-                if p_ht is None:
+                off = aplicar_gesto(gesto_tipo, time.time() - gesto_t0, gesto_params)
+                if off is None:
                     gesto_t0 = None
                 else:
-                    roll = gesto_dir * np.radians(HEAD_TILT_DEG) * p_ht
+                    roll = off.get("roll", 0.0)
+                    dtilt = off.get("dtilt", 0.0)
+                    dpan = off.get("dpan", 0.0)
+                    dreach = off.get("dreach", 0.0)
+                    dq = off.get("dq", {})
 
             # ---- PESCOÇO (cascata com "desenrolar") ----
             # O PUNHO (joint5) faz o pan RÁPIDO; a BASE (joint1) "desenrola" o punho de
@@ -595,8 +664,9 @@ def main():
 
             # ---- IK: mira (base_ik via base) → 6 juntas; o punho entra POR CIMA ----
             if fase == "seguir" and not fault_ativo:
-                q_ik, ok, ik_iters, ik_ms = resolver_ik(geom, base_ik, base_tilt,
-                                                        q_ref, altura, roll)
+                q_ik, ok, ik_iters, ik_ms = resolver_ik(geom, base_ik + dpan,
+                                                        base_tilt + dtilt, q_ref,
+                                                        altura, roll, dreach)
                 if ok:
                     jump = float(np.degrees(np.max(np.abs(q_ik - q_ref))))
                 if ok and jump <= IK_FLIP_DEG:
@@ -605,7 +675,10 @@ def main():
                     q_ik[PESCOCO_J5] = float(np.clip(        # pescoço: offset no punho
                         q_ik[PESCOCO_J5] + par["sinal_neck"] * neck,
                         _LO[PESCOCO_J5] + margem, _HI[PESCOCO_J5] - margem))
-                    est["q_target"][:] = q_ik                # comando = IK + pescoço
+                    for idx, val in dq.items():              # gesto "só cabeça": junta direta
+                        q_ik[idx] = float(np.clip(q_ik[idx] + val,
+                                                  _LO[idx] + margem, _HI[idx] - margem))
+                    est["q_target"][:] = q_ik                # comando = IK + pescoço + gesto
                     ik_ok = True
                     n_falhas = 0
                 else:
@@ -678,6 +751,8 @@ def main():
                           f"iters={ik_iters} {ik_ms:.2f}ms") if fase == "seguir" else "IK: --"
                 cal = ("calibrado: OK" if calibrado else "calibrado: NAO (tecle k)",
                        COR_OK if calibrado else COR_ERRO)
+                gp_hud = par["gestos"][par["gesto_tipo"]]
+                tipos_txt = " ".join(f"{i+1}:{t[:4]}" for i, t in enumerate(GESTO_TIPOS))
                 if modo_ajuste:
                     linhas = linhas_ajustes(par, sel)
                 else:
@@ -702,8 +777,14 @@ def main():
                         (f"pescoco: +/-{par['neck_max']:.0f}deg  punho={np.degrees(neck):+.0f}  "
                          f"base={np.degrees(base_ik):+.0f}  sinal={par['sinal_neck']:+d}  "
                          f"desenrola={par['neck_relax']:.1f}", COR_VAL),
+                        (f"gesto(g): {par['gesto_tipo']} amp={gp_hud['amp']:.0f} "
+                         f"vel={gp_hud['vel']:.2f}s hold={gp_hud['hold']:.1f}s"
+                         + ("  [tocando]" if gesto_t0 is not None else "")
+                         + f"   1-7: {tipos_txt}",
+                         COR_AVISO if gesto_t0 is not None else COR_VAL),
                         ("TAB ajustes | ESPACO encara | k calibra | t pausa | u fuga | "
-                         "g head-tilt | c recentra | n salva | f flutua | ESC", COR_DIM),
+                         "g/1-7 gesto | c recentra | n salva | f flutua | ESC",
+                         COR_DIM),
                     ]
                 painel(frame, 8, 8, linhas, escala=0.5)
 
@@ -727,6 +808,9 @@ def main():
                     ajustar_item(par, sel, +1)
                 elif k in (ord("-"), ord("[")):       # -
                     ajustar_item(par, sel, -1)
+                elif k == ord("g"):                   # toca o gesto SEM sair do painel
+                    if fase == "seguir":
+                        tocar_gesto_tipo(par["gesto_tipo"])
                 elif k == ord("n"):
                     salvar_tudo()
             elif k in (ord("q"), 27):        # ====== modo NORMAL (ações) ======
@@ -771,10 +855,16 @@ def main():
                 autonomia.reset()
                 aviso("Perseguicao ON (vai pro lado que voce sumiu)" if perseguicao_on
                       else "Perseguicao OFF", COR_OK if perseguicao_on else COR_DIM)
-            elif k == ord("g"):              # head-tilt (inclina a cabeca, alterna o lado)
+            elif k == ord("g"):              # toca o gesto do tipo selecionado (config dele)
                 if fase == "seguir":
-                    gesto_t0 = time.time()
-                    gesto_dir = -gesto_dir
+                    tocar_gesto_tipo(par["gesto_tipo"])
+            elif 49 <= k <= 48 + len(GESTO_TIPOS):   # '1'..'7' tocam cada gesto direto
+                if fase == "seguir":
+                    tipo = GESTO_TIPOS[k - 49]
+                    tocar_gesto_tipo(tipo)
+                    aviso(f"Gesto: {tipo}", COR_VAL)
+                else:
+                    aviso("Trave a home primeiro (ESPACO)", COR_AVISO)
             elif k == ord("n"):              # salva config (acorda sozinho na proxima)
                 salvar_tudo()
             elif k == ord("z"):              # marca a pose 'sentado' (repouso) limpa

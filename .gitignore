@@ -10,6 +10,8 @@ __pycache__/
 # Configuração local (calibração específica do SEU braço/câmera)
 config_seguir.json
 config_seguir_ik.json
+gestos.json
+gestos_ik.json
 
 # Logs de debug (tecla 'd')
 log_*.csv
