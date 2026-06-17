@@ -172,16 +172,20 @@ function Toast({ estado }) {
     if (t && t.t && t.t !== lastT.current) {
       lastT.current = t.t
       setMsg(t)
-      const id = setTimeout(() => setMsg(null), 2600)
+      const id = setTimeout(() => setMsg(null), 4000)   // some sozinho após 4s
       return () => clearTimeout(id)
     }
   }, [estado])
   if (!msg) return null
   const cor = { ok: 'bg-emerald-600', erro: 'bg-rose-600', aviso: 'bg-amber-500' }[msg.kind] || 'bg-gray-800'
   return (
-    <div className={`fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-xl ${cor} px-5 py-2.5
-                     text-sm font-medium text-white shadow-xl ring-1 ring-black/10`}>
-      {msg.txt}
+    <div className={`fixed bottom-6 left-1/2 z-50 flex -translate-x-1/2 items-center gap-3 rounded-xl ${cor}
+                     px-5 py-2.5 text-sm font-medium text-white shadow-xl ring-1 ring-black/10`}>
+      <span>{msg.txt}</span>
+      <button onClick={() => setMsg(null)} title="fechar"
+        className="-mr-1 flex h-6 w-6 items-center justify-center rounded-md text-white/80 hover:bg-white/20 hover:text-white">
+        ✕
+      </button>
     </div>
   )
 }
