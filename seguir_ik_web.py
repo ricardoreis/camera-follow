@@ -33,7 +33,10 @@ import json
 import os
 import random
 import sys
+import threading
 import time
+import webbrowser
+from collections import deque
 
 import numpy as np
 import cv2
@@ -337,11 +340,22 @@ def main():
     frame_idx = 0
     mostra_overlay = True
     toast = [None]
+    eventos = deque(maxlen=80)     # log de alto nível ("cérebro") p/ o terminal da web
+    _ev = [0]
+    pedir_parar = [False]          # ESC/Stop na web → pousa e encerra
+    prev_auto = "seguindo"         # p/ logar transições de estado (perseguindo/varrendo…)
+
+    def log_evento(txt, kind="info"):
+        _ev[0] += 1
+        eventos.append({"id": _ev[0], "t": time.strftime("%H:%M:%S"), "txt": txt, "kind": kind})
+        diario.evento("log", txt=txt, kind=kind)
 
     def aviso(texto, cor=COR_OK):
         toast[0] = (texto, cor, time.time())
+        kind = ("ok" if cor == COR_OK else "erro" if cor == COR_ERRO
+                else "aviso" if cor == COR_AVISO else "info")
+        log_evento(texto, kind)
         print(f"--- {texto} ---")
-        diario.evento("aviso", txt=texto)
 
     def salvar_tudo():
         """Salva home + repouso + calibração + TODOS os ajustes (par). Usado pelo 'n'."""
@@ -365,6 +379,7 @@ def main():
         """Seleciona um tipo e dispara com a config DELE (cada gesto tem a sua)."""
         gp = par["gestos"][tipo]
         par["gesto_tipo"] = tipo
+        log_evento(f"Gesto: {tipo}", "info")
         tocar_gesto(tipo, gp["amp"], gp["vel"], gp["hold"])
 
     def aplicar_comando(cmd):
@@ -395,8 +410,37 @@ def main():
         elif c == "recentra":
             base_pan = base_tilt = 0.0
             altura = 0.0
+            aviso("Olhar recentrado", COR_VAL)
         elif c == "salvar":
             salvar_tudo()
+        elif c == "encara":                       # ESPACO: trava a home e segue
+            if fase == "posicionar":
+                entrar_em_seguir()
+        elif c == "flutua":                       # f: volta a flutuar
+            if fase == "seguir":
+                voltar_a_flutuar()
+        elif c == "calibrar":                     # k: auto-calibração
+            if fase == "seguir" and not fault_ativo:
+                tracking = False
+                calibrar()
+            else:
+                aviso("Trave a home primeiro (ESPACO)", COR_AVISO)
+        elif c == "sentado":                      # z: marca a pose de repouso
+            if fase == "posicionar":
+                est["repouso"] = np.asarray(arm.get_positions(), dtype=float).copy()
+                aviso("Pose 'sentado' (repouso) marcada", COR_OK)
+        elif c == "procurar":                     # u: fuga+varredura on/off
+            par["procurar_on"] = not par["procurar_on"]
+            autonomia.reset()
+            aviso("Procurar ON" if par["procurar_on"] else "Procurar OFF",
+                  COR_OK if par["procurar_on"] else COR_DIM)
+        elif c == "curioso":                      # m: curiosidade on/off
+            par["curioso_on"] = not par["curioso_on"]
+            curiosidade.reset()
+            aviso("Curiosidade ON" if par["curioso_on"] else "Curiosidade OFF",
+                  COR_OK if par["curioso_on"] else COR_DIM)
+        elif c == "parar":                        # ESC/Stop: pousa e encerra
+            pedir_parar[0] = True
 
     diario.config(modelo="ponto_fixo", sinais=[sinal_pan, sinal_tilt], ganho=par["ganho"],
                   deadzone_px=par["zona"], limite_deg=par["limite"], previsao_ms=par["previsao"],
@@ -432,6 +476,7 @@ def main():
         # a web apenas LÊ (estado/vídeo) e EMPILHA comandos na fila.
         servidor_web.iniciar(spec=AJUSTES_SPEC, porta=8000)
         print("--- painel web: http://localhost:8000  (no celular: http://IP-DO-PC:8000) ---")
+        threading.Timer(1.3, lambda: webbrowser.open("http://localhost:8000")).start()
 
         # radpx (rad de mira por pixel) a partir do FOV — fallback; a calibração mede.
         ret, frame = cap.read()
@@ -650,6 +695,10 @@ def main():
                     aplicar_comando(cmd_web)
                 except Exception as e:
                     diario.evento("erro_comando_web", cmd=cmd_web, msg=str(e))
+            if pedir_parar[0]:                       # ESC/Stop pela web → pousa e encerra
+                log_evento("Encerrando — pousando no repouso", "aviso")
+                ramp_repouso()
+                break
 
             faces = detector.detectar(frame, escala=0.5)
             alvo_face = max(faces, key=lambda f: f.area) if faces else None
@@ -715,6 +764,15 @@ def main():
             else:
                 auto_estado = "seguindo"
 
+            if auto_estado != prev_auto and gesto_t0 is None:    # loga as transições
+                _nm = {"perseguindo": "Perdi você — perseguindo o canto",
+                       "varrendo": "Procurando ao redor (varredura)",
+                       "ocioso": "Ocioso — esperando você voltar",
+                       "seguindo": "Te encontrei — seguindo"}
+                log_evento(_nm.get(auto_estado, auto_estado),
+                           "ok" if auto_estado == "seguindo" else "aviso")
+            prev_auto = auto_estado
+
             # ---- VIDA: curiosidade (gesto sozinho parado) + respirar (overlay ocioso) ----
             idle_pan = idle_tilt = 0.0
             if fase == "seguir" and tracking and not fault_ativo and gesto_t0 is None:
@@ -726,8 +784,8 @@ def main():
                 if curiosidade.update(agora, pronto, par["parado_s"], par["cooldown_s"]):
                     curiosos = [t for t in GESTO_TIPOS if par["gestos"][t]["curioso"]]
                     if curiosos:
+                        log_evento("Curiosidade (você ficou parado)", "aviso")
                         tocar_gesto_tipo(random.choice(curiosos))
-                        aviso(f"Curioso! {par['gesto_tipo']}", COR_VAL)
                 # respira só quando seguindo+presente (e o gesto não acabou de disparar)
                 if par["respirar_on"] and auto_estado == "seguindo" and gesto_t0 is None:
                     rp, rt = respirar(agora, par["respirar_amp"])
@@ -840,6 +898,7 @@ def main():
                 "sinais": [int(sinal_pan), int(sinal_tilt)],
                 "par": {k: v for k, v in par.items() if k != "gestos"},
                 "gestos": par["gestos"], "tipos": GESTO_TIPOS,
+                "eventos": list(eventos),
             })
 
             # ---- Desenhos ----
@@ -993,9 +1052,7 @@ def main():
                     tocar_gesto_tipo(par["gesto_tipo"])
             elif 49 <= k <= 48 + len(GESTO_TIPOS):   # '1'..'7' tocam cada gesto direto
                 if fase == "seguir":
-                    tipo = GESTO_TIPOS[k - 49]
-                    tocar_gesto_tipo(tipo)
-                    aviso(f"Gesto: {tipo}", COR_VAL)
+                    tocar_gesto_tipo(GESTO_TIPOS[k - 49])
                 else:
                     aviso("Trave a home primeiro (ESPACO)", COR_AVISO)
             elif k == ord("n"):              # salva config (acorda sozinho na proxima)
