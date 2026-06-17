@@ -778,8 +778,15 @@ def main():
                          par=[round(par["ganho"], 2), par["limite"], par["previsao"]])
 
             # ---- estado público p/ a web (websocket) ----
+            tt = toast[0]                                   # (texto, cor, t0) ou None
+            toast_pub = None
+            if tt is not None and (agora - tt[2]) < TOAST_DUR:   # só enquanto fresco
+                kind = ("ok" if tt[1] == COR_OK else "erro" if tt[1] == COR_ERRO
+                        else "aviso" if tt[1] == COR_AVISO else "info")
+                toast_pub = {"txt": tt[0], "t": round(tt[2], 3), "kind": kind}
             ESTADO.publicar_estado({
                 "fase": fase, "tracking": bool(tracking and not fault_ativo),
+                "toast": toast_pub,
                 "calibrado": calibrado, "fault": fault_ativo,
                 "tem_rosto": ponto_cru is not None,
                 "erro": [int(erro[0]), int(erro[1])] if erro else None,
