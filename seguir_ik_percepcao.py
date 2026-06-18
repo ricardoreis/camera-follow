@@ -86,6 +86,7 @@ PREVISAO_MS = 60.0
 FOV_H, FOV_V = 70.0, 43.0  # C920: com IK o olhar é a rotação ÓPTICA real → FOV ≈ correto
 
 IK_FLIP_DEG = 15.0          # salto de junta acima disso = virada → desfaz a mira
+SLEW_MAX = np.radians(8.0)  # taxa máx de mudança do alvo por frame (suaviza trancos)
 MARGEM_LIMITE_DEG = 4.0     # nunca comandar a junta encostada no batente
 
 # Acompanhamento de ALTURA (só vertical): se o tilt se MANTÉM, sobe/desce devagar.
@@ -127,13 +128,13 @@ CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # Config PADRÃO de cada gesto (amp graus, vel/hold s, curioso=entra na curiosidade).
 # Cada TIPO guarda a SUA config — editar um não mexe nos outros.
 GESTO_DEF = {
-    "single":    {"amp": 25.0, "vel": 0.30, "hold": 0.9,  "curioso": True},
-    "swing":     {"amp": 22.0, "vel": 0.25, "hold": 0.4,  "curioso": True},
-    "sim":       {"amp": 12.0, "vel": 0.22, "hold": 0.15, "curioso": True},
-    "nao":       {"amp": 14.0, "vel": 0.22, "hold": 0.15, "curioso": False},
-    "feliz":     {"amp": 10.0, "vel": 0.18, "hold": 0.10, "curioso": True},
-    "dancar":    {"amp": 12.0, "vel": 0.22, "hold": 0.10, "curioso": False},
-    "espreitar": {"amp": 25.0, "vel": 0.50, "hold": 0.70, "curioso": True},
+    "single":    {"amp": 25.0, "vel": 0.30, "hold": 0.9,  "volta": 0.5, "curioso": True},
+    "swing":     {"amp": 22.0, "vel": 0.25, "hold": 0.4,  "volta": 0.5, "curioso": True},
+    "sim":       {"amp": 12.0, "vel": 0.22, "hold": 0.15, "volta": 0.4, "curioso": True},
+    "nao":       {"amp": 14.0, "vel": 0.22, "hold": 0.15, "volta": 0.4, "curioso": False},
+    "feliz":     {"amp": 10.0, "vel": 0.18, "hold": 0.10, "volta": 0.4, "curioso": True},
+    "dancar":    {"amp": 12.0, "vel": 0.22, "hold": 0.10, "volta": 0.4, "curioso": False},
+    "espreitar": {"amp": 25.0, "vel": 0.50, "hold": 0.70, "volta": 0.7, "curioso": True},
 }
 
 
@@ -153,7 +154,7 @@ def par_default():
         "respirar_amp": RESPIRAR_AMP, "parado_s": PARADO_S, "cooldown_s": COOLDOWN_S,
         "vel_parado": VEL_PARADO,
         # percepção/gestos (toggles dinâmicos)
-        "seguir_corpo": True, "gestos_on": True,
+        "seguir_corpo": True, "gestos_on": True, "corpo_conf": 0.7,
     }
 
 
@@ -177,6 +178,7 @@ AJUSTES_SPEC = [
     ("GESTOS",   "g_amp",        "amplitude",         5.0, 5.0,  90.0,  "deg"),
     ("GESTOS",   "g_vel",        "velocidade",       0.05, 0.10,  1.50, "f2s"),
     ("GESTOS",   "g_hold",       "hold",              0.1, 0.0,   4.0,  "f1s"),
+    ("GESTOS",   "g_volta",      "velocidade volta",  0.05, 0.05,  3.0, "f2s"),
     ("GESTOS",   "g_curioso",    "usa na curiosidade",  0,   0,     1,  "bool"),
     ("COMPORTAMENTOS", "procurar_on",  "procurar (fuga+varredura)", 0, 0, 1, "bool"),
     ("COMPORTAMENTOS", "curioso_on",   "curiosidade",         0,   0,    1,  "bool"),
@@ -187,6 +189,7 @@ AJUSTES_SPEC = [
     ("COMPORTAMENTOS", "respirar_amp", "intensidade respiro", 0.2, 0.0, 4.0, "f1"),
     ("COMPORTAMENTOS", "seguir_corpo", "seguir pelo corpo",     0,   0,    1,  "bool"),
     ("COMPORTAMENTOS", "gestos_on",    "gestos ligados",        0,   0,    1,  "bool"),
+    ("COMPORTAMENTOS", "corpo_conf",   "confianca corpo",     0.05, 0.30, 0.95, "f2"),
 ]
 
 
@@ -384,12 +387,12 @@ def main():
         else:
             aviso("Trave a home (ESPACO) e calibre (k) antes de salvar", COR_AVISO)
 
-    def tocar_gesto(tipo, amp, vel, hold):
-        """Dispara um gesto (tipo + params). O loop o aplica até terminar."""
+    def tocar_gesto(tipo, amp, vel, hold, volta=HT_DESCE):
+        """Dispara um gesto (tipo + params). 'volta' = tempo de VOLTA (descida)."""
         nonlocal gesto_t0, gesto_dir, gesto_tipo, gesto_params
         gesto_dir = -gesto_dir          # alterna o lado (single)
         gesto_tipo = tipo
-        gesto_params = {"amp": amp, "sobe": vel, "segura": hold, "desce": HT_DESCE,
+        gesto_params = {"amp": amp, "sobe": vel, "segura": hold, "desce": volta,
                         "dir": gesto_dir}
         gesto_t0 = time.time()
 
@@ -400,7 +403,7 @@ def main():
         gp = par["gestos"][tipo]
         par["gesto_tipo"] = tipo
         log_evento(f"Gesto: {tipo}", "info")
-        tocar_gesto(tipo, gp["amp"], gp["vel"], gp["hold"])
+        tocar_gesto(tipo, gp["amp"], gp["vel"], gp["hold"], gp.get("volta", HT_DESCE))
 
     def aplicar_comando(cmd):
         """Aplica um comando vindo da WEB. Roda na thread do loop (seguro). No MVP só
@@ -723,7 +726,7 @@ def main():
             # ---- PERCEPÇÃO: o ALVO é o rosto; se a cabeça sai, vira o CORPO (cabeça
             # estimada acima dos ombros) → não perde a pessoa quando senta/levanta/cobre. ----
             est_p = perc.processa(frame, int((time.time() - t_perc0) * 1000),
-                                  usar_corpo=par["seguir_corpo"])
+                                  usar_corpo=par["seguir_corpo"], conf=par["corpo_conf"])
             alvo_face = est_p["rosto"]              # p/ desenhar a caixa do rosto
             fonte_alvo = est_p["fonte"]             # "rosto" | "corpo" | None
             ponto_cru = est_p["alvo"]               # ALVO (rosto -> corpo -> None)
@@ -845,6 +848,7 @@ def main():
 
             # ---- IK: mira (base_ik via base) → 6 juntas; o punho entra POR CIMA ----
             if fase == "seguir" and not fault_ativo:
+                q_prev_cmd = np.asarray(est["q_target"], dtype=float).copy()   # p/ o slew
                 q_ik, ok, ik_iters, ik_ms = resolver_ik(geom, base_ik + dpan + idle_pan,
                                                         base_tilt + dtilt + idle_tilt, q_ref,
                                                         altura, roll, dreach)
@@ -921,6 +925,12 @@ def main():
                             diario.evento("ik_destravando",
                                           pan=round(float(np.degrees(base_pan)), 1),
                                           altura=round(altura, 3))
+
+                # SLEW: limita a taxa de mudança do alvo por frame → mata trancos (no
+                # tracking normal a mira já é lenta; só "corta" os saltos grandes).
+                d = np.clip(np.asarray(est["q_target"], dtype=float) - q_prev_cmd,
+                            -SLEW_MAX, SLEW_MAX)
+                est["q_target"][:] = q_prev_cmd + d
 
             # ---- telemetria por frame ----
             diario.frame(i=frame_idx, fase=fase, trk=bool(tracking and not fault_ativo),

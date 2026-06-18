@@ -76,9 +76,10 @@ class Percepcao:
             return "PERTO" if larg > w * 0.28 else "LONGE" if larg < w * 0.16 else "media"
         return None
 
-    def processa(self, frame_bgr, ts_ms, usar_corpo=True):
+    def processa(self, frame_bgr, ts_ms, usar_corpo=True, conf=CORPO_CONF):
         """Devolve um dict com o ALVO + sinais. `_lms` (pose) sai junto p/ desenho.
-        usar_corpo=False -> só rosto (não roda o Pose; sem alvo de corpo)."""
+        usar_corpo=False -> só rosto (não roda o Pose). `conf` = confiança mínima dos
+        ombros p/ aceitar o corpo (ajustável ao vivo; maior = menos objeto virando corpo)."""
         h, w = frame_bgr.shape[:2]
         faces = self.detector.detectar(frame_bgr, escala=0.5)
         lms = None
@@ -92,8 +93,8 @@ class Percepcao:
         if faces:
             rosto = max(faces, key=lambda f: f.area)
             alvo, fonte = rosto.centro_olhos, "rosto"
-        elif (lms is not None and lms[OMB_E].visibility >= CORPO_CONF
-              and lms[OMB_D].visibility >= CORPO_CONF):     # confiança ALTA → anti-objeto
+        elif (lms is not None and lms[OMB_E].visibility >= conf
+              and lms[OMB_D].visibility >= conf):           # confiança ALTA → anti-objeto
             cx = (lms[OMB_E].x + lms[OMB_D].x) / 2 * w
             cy = (lms[OMB_E].y + lms[OMB_D].y) / 2 * h
             larg = abs(lms[OMB_E].x - lms[OMB_D].x) * w     # mira acima dos ombros (cabeça)
