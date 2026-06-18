@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""lab_altura.py — LAB GUIADO: diagnostica o "MOVIMENTO ESTRANHO" da ALTURA e acha a
-ALTURA MÁXIMA SEGURA.
+"""lab_altura.py (v2) — LAB GUIADO: mede o ALCANCE VERTICAL do braco (altura) e onde o
+IK falha (o "movimento estranho"). Tudo em SIMULACAO (nao move o braco em risco).
 
-Faz o mapa em SIMULAÇÃO (não move o braço em risco): com a home travada te encarando,
-mede até onde o IK resolve BEM conforme a altura sobe (tilt=0), e a zona instável
-ALTURA × TILT (incl. o "flip" que a recuperação por home causaria). Loga tudo p/ um
-diagnóstico certeiro.
+Como funciona: a partir de uma POSE DE REFERENCIA, varre a altura PRA CIMA e PRA BAIXO
+(tilt=0) ate o IK falhar, achando o range usavel; e ve quanto da p/ olhar p/ baixo no topo.
 
-Rodar (no venv da app):  .venv/bin/python lab_altura.py
-PASSO 1: flutue e ENCARE-SE; ESPACO trava a home e roda o mapa.
-PASSO 2: RESUMO na tela + log em logs_labs/altura_*.jsonl. ESC pousa e sai.
+Referencia (voce escolhe):
+  ESPACO -> usa a HOME SALVA (config_seguir_ik.json) = sua pose normal. NAO toque no braco.
+  H      -> usa a POSE ATUAL (posicione o braco com a mao antes) -> p/ testar uma home mais alta.
+
+Texto ASCII (sem bug de fonte). ESC pousa e sai. Log em logs_labs/altura_*.jsonl.
+Rodar:  .venv/bin/python lab_altura.py
 """
 
 import json
@@ -27,137 +28,142 @@ from lab_braco import Braco
 CAMERA = "C920"
 MARGEM = np.radians(4.0)
 IK_FLIP = 15.0
-ALT_TESTE = 0.45
-ALTURAS = [0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40]
-TILTS = list(range(25, -31, -3))     # +25 (olha p/ cima) -> -30 (p/ baixo)
+PASSO = 0.01            # 1 cm por passo
+LIM = 0.45             # testa ate +/-45 cm
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config_seguir_ik.json")
 
 
-def folga_limites(q):
+def folga(q):
     d = np.minimum(q - (_LO + MARGEM), (_HI - MARGEM) - q)
     i = int(np.argmin(d))
-    return float(np.degrees(d[i])), i + 1       # junta 1..6
+    return float(np.degrees(d[i])), i + 1
 
 
-def mapa_altura(geom, home, reg):
-    """Sobe a altura (tilt=0) e mede o IK. Devolve a altura máx 'boa' (cm) + o ponto onde quebrou."""
-    q_seed = home.copy(); alt_ok = 0.0; quebra = None; a = 0.0
-    while a <= ALT_TESTE + 1e-9:
-        q, ok, iters, _ = resolver_ik(geom, 0.0, 0.0, q_seed, a)
-        jump = float(np.degrees(np.max(np.abs(q - q_seed)))) if ok else None
-        fol, ji = folga_limites(q) if ok else (None, None)
-        bom = ok and jump is not None and jump <= IK_FLIP and fol is not None and fol > 1.5
-        reg.linha(tipo="alt", alt_cm=round(a * 100, 1), ok=bool(ok), jump=jump,
-                  iters=int(iters), folga_deg=fol, junta=ji)
-        if bom:
-            q_seed = q; alt_ok = a
+def bom(q, q0, ok):
+    if not ok:
+        return False
+    jump = float(np.degrees(np.max(np.abs(q - q0))))
+    fol, _ = folga(q)
+    return jump <= IK_FLIP and fol > 1.5
+
+
+def varre(geom, home, sentido, reg):
+    """Varre a altura no 'sentido' (+1 cima / -1 baixo) ate falhar. Devolve (cm_ok, junta_lim)."""
+    q = home.copy(); melhor = 0.0; junta = None; a = 0.0
+    while abs(a) <= LIM + 1e-9:
+        qx, ok, iters, _ = resolver_ik(geom, 0.0, 0.0, q, a)
+        ok_bom = bom(qx, q, ok)
+        fol, ji = folga(qx) if ok else (None, None)
+        reg.linha(tipo="vert", alt_cm=round(a * 100, 1), ok=bool(ok), bom=ok_bom,
+                  folga_deg=round(fol, 1) if fol else None, junta=ji)
+        if ok_bom:
+            q = qx; melhor = a
         else:
-            quebra = {"alt_cm": round(a * 100, 1), "ok": bool(ok),
-                      "jump": round(jump, 1) if jump else None,
-                      "folga": round(fol, 1) if fol else None, "junta": ji}
+            junta = ji if ok else "IK falhou"
             break
-        a += 0.01
-    return round(alt_ok * 100, 1), quebra
+        a += sentido * PASSO
+    return round(melhor * 100), junta
 
 
-def mapa_alt_tilt(geom, home, reg):
-    """Pra cada altura, varre o tilt e mede IK + o 'flip' do re-seed por HOME (a recuperação)."""
-    linhas = []
-    for alt in ALTURAS:
-        q_seed = home.copy(); a = 0.0
-        while a < alt - 1e-9:                    # encadeia o seed até essa altura
-            q, ok, _, _ = resolver_ik(geom, 0.0, 0.0, q_seed, min(a, alt))
-            if ok:
-                q_seed = q
-            a += 0.02
-        tilt_min_ok = None; flip_max = 0.0; falhas = 0
-        for td in TILTS:
-            q, ok, iters, _ = resolver_ik(geom, 0.0, np.radians(td), q_seed, alt)
-            jump = float(np.degrees(np.max(np.abs(q - q_seed)))) if ok else None
-            bom = ok and jump is not None and jump <= IK_FLIP
-            qh, okh, _, _ = resolver_ik(geom, 0.0, np.radians(td), home, alt)   # re-seed por home
-            flip = float(np.degrees(np.max(np.abs(qh - q)))) if (ok and okh) else None
-            reg.linha(tipo="alt_tilt", alt_cm=round(alt * 100), tilt=td, ok=bool(ok),
-                      jump=round(jump, 1) if jump else None,
-                      flip_home=round(flip, 1) if flip else None, iters=int(iters))
-            if bom:
-                q_seed = q; tilt_min_ok = td
-            else:
-                falhas += 1
-            if flip is not None:
-                flip_max = max(flip_max, flip)
-        linhas.append({"alt_cm": round(alt * 100), "tilt_min_ok": tilt_min_ok,
-                       "falhas": falhas, "flip_max": round(flip_max)})
-    return linhas
+def tilt_no_topo(geom, home, alt_topo_cm, reg):
+    """No topo da altura, ate quanto da p/ olhar p/ baixo (tilt negativo) sem o IK falhar."""
+    alt = alt_topo_cm / 100.0
+    q = home.copy(); a = 0.0
+    while a < alt - 1e-9:                       # encadeia o seed ate o topo
+        qx, ok, _, _ = resolver_ik(geom, 0.0, 0.0, q, min(a, alt))
+        if ok:
+            q = qx
+        a += 0.02
+    tmin = 0
+    for td in range(0, -41, -2):
+        qx, ok, _, _ = resolver_ik(geom, 0.0, np.radians(td), q, alt)
+        reg.linha(tipo="tilt_topo", tilt=td, ok=bool(ok and bom(qx, q, ok)))
+        if bom(qx, q, ok):
+            q = qx; tmin = td
+        else:
+            break
+    return tmin
 
 
-def _instrucoes(passo, alt_ok, quebra, tab):
-    if passo == 1:
-        return [("LAB ALTURA — PASSO 1/2: POSICIONAR", (0, 215, 255)),
+def rodar_mapa(geom, home, ref_nome, reg):
+    reg.linha(tipo="ref", ref=ref_nome, home_deg=[round(float(np.degrees(x)), 1) for x in home])
+    cima, jU = varre(geom, home, +1, reg)
+    baixo, jD = varre(geom, home, -1, reg)
+    tmin = tilt_no_topo(geom, home, cima, reg)
+    res = {"ref": ref_nome, "baixo_cm": baixo, "cima_cm": cima,
+           "range_cm": cima - baixo, "junta_cima": jU, "junta_baixo": jD, "tilt_topo": tmin}
+    reg.linha(tipo="resumo", **res)
+    print("--- RESUMO:", res, "---")
+    return res
+
+
+def instrucoes(res):
+    if res is None:
+        return [("LAB ALTURA v2 - alcance vertical (simulacao)", (0, 215, 255)),
                 ("", (200, 200, 200)),
-                ("Flutue o braco com a mao ate ele TE ENCARAR de frente,", (210, 210, 210)),
-                ("com seu rosto no centro. (a home = referencia do mapa)", (210, 210, 210)),
+                ("ESPACO = mapear a partir da HOME SALVA (nao toque no braco)", (210, 210, 210)),
+                ("H      = mapear a partir da POSE ATUAL (posicione com a mao)", (210, 210, 210)),
                 ("", (200, 200, 200)),
-                (">>> ESPACO trava a home e RODA o mapa (simulacao) <<<", (60, 175, 255))]
-    linhas = [("LAB ALTURA — PASSO 2/2: RESUMO", (0, 215, 255)), ("", (200, 200, 200)),
-              (f"ALTURA MAXIMA SEGURA (tilt 0): ~{alt_ok:.0f} cm", (120, 235, 120))]
-    if quebra:
-        m = ("IK falhou" if not quebra["ok"] else
-             f"saltou {quebra['jump']}deg" if (quebra.get('jump') or 0) > IK_FLIP else
-             f"junta {quebra['junta']} no batente (folga {quebra['folga']}deg)")
-        linhas.append((f"  quebrou em {quebra['alt_cm']:.0f} cm: {m}", (60, 175, 255)))
-    linhas.append(("ALTURA x TILT (tilt_min = quanto da p/ olhar p/ BAIXO):", (235, 225, 130)))
-    for r in tab:
-        cor = (120, 120, 245) if (r["falhas"] > 0 or r["flip_max"] > IK_FLIP) else (210, 210, 210)
-        tm = f"{r['tilt_min_ok']:+d}deg" if r["tilt_min_ok"] is not None else "FALHA"
-        linhas.append((f"  {r['alt_cm']:>3.0f}cm: tilt_min {tm:>7}  falhas {r['falhas']}  "
-                       f"flip-home ate {r['flip_max']:.0f}deg", cor))
-    linhas += [("", (200, 200, 200)),
-               ("Vermelho = zona do 'movimento estranho' (IK falha/flippa).", (150, 150, 150)),
-               (">>> log salvo — mande pro assistente.  ESC pousa e sai <<<", (60, 175, 255))]
-    return linhas
+                ("(o braco NAO se move no mapa - e tudo simulacao)", (150, 150, 150)),
+                (">>> ESPACO ou H para medir | ESC sai <<<", (60, 175, 255))]
+    return [("LAB ALTURA v2 - RESUMO", (0, 215, 255)),
+            (f"referencia: {res['ref']}", (150, 150, 150)),
+            ("", (200, 200, 200)),
+            (f"ALCANCE VERTICAL: de {res['baixo_cm']:+d} cm ate {res['cima_cm']:+d} cm "
+             f"(total {res['range_cm']} cm)", (120, 235, 120)),
+            (f"limite p/ CIMA:  junta {res['junta_cima']}", (235, 225, 130)),
+            (f"limite p/ BAIXO: junta {res['junta_baixo']}", (235, 225, 130)),
+            (f"no topo (+{res['cima_cm']}cm), olha p/ baixo ate {res['tilt_topo']} graus", (235, 225, 130)),
+            ("", (200, 200, 200)),
+            ("ESPACO/H = medir de novo (outra referencia) | ESC pousa e sai", (60, 175, 255))]
 
 
 def main():
     try:
         cap, idx = camera.abrir_camera(CAMERA)
-        print(f"--- câmera {CAMERA} (idx {idx}) ---")
+        print(f"--- camera {CAMERA} (idx {idx}) ---")
     except Exception as e:
-        print("!!! sem câmera, idx 0:", e); cap = cv2.VideoCapture(0)
-    janela = "Lab ALTURA (guiado)  [ESPACO mapeia | ESC sai]"
+        print("!!! sem camera, idx 0:", e); cap = cv2.VideoCapture(0)
+    janela = "Lab ALTURA v2  [ESPACO=home salva | H=pose atual | ESC sai]"
     cv2.namedWindow(janela, cv2.WINDOW_NORMAL); cv2.resizeWindow(janela, 1280, 760)
 
     braco = Braco(cap, janela)
     braco.iniciar()
     reg = Registro("altura")
 
-    passo, alt_ok, quebra, tab = 1, 0.0, None, []
+    home_salva = None
+    if os.path.exists(CONFIG_PATH):
+        try:
+            home_salva = np.asarray(json.load(open(CONFIG_PATH))["home"], dtype=float)
+        except Exception:
+            pass
+
+    res = None
+    pedido = None
     try:
         while True:
             ok, frame = cap.read()
             if not ok:
                 break
-            hud(frame, _instrucoes(passo, alt_ok, quebra, tab), x=14, y=30)
+            if pedido is not None:                 # mostra "CALCULANDO" antes de travar no calc
+                fr = frame.copy()
+                hud(fr, [("CALCULANDO... (simulacao, ~1s)", (60, 200, 255))], x=14, y=40)
+                cv2.imshow(janela, fr); cv2.waitKey(1)
+                ref_nome, home_ref = pedido
+                res = rodar_mapa(geometria(home_ref), home_ref, ref_nome, reg)
+                pedido = None
+            hud(frame, instrucoes(res), x=14, y=30)
             cv2.imshow(janela, frame)
             k = cv2.waitKey(1) & 0xFF
             if k == 27:
                 break
-            elif k == 32 and passo == 1:        # ESPACO: trava home + roda o mapa
-                if braco.arm is not None:
-                    home = np.asarray(braco.arm.get_positions(), dtype=float)
-                    braco.travar()
-                elif os.path.exists(CONFIG_PATH):
-                    home = np.asarray(json.load(open(CONFIG_PATH))["home"], dtype=float)
+            elif k == 32:                          # ESPACO: home salva
+                if home_salva is not None:
+                    pedido = ("HOME SALVA", home_salva)
                 else:
-                    home = np.zeros(6)
-                geom = geometria(home)
-                reg.linha(tipo="home", home_deg=[round(float(np.degrees(x)), 1) for x in home])
-                print("--- mapeando (simulacao)... ---")
-                alt_ok, quebra = mapa_altura(geom, home, reg)
-                tab = mapa_alt_tilt(geom, home, reg)
-                reg.linha(tipo="resumo", alt_max_cm=alt_ok, quebra=quebra, tabela=tab)
-                print("--- alt_max_ok:", alt_ok, "cm | tabela:", tab, "---")
-                passo = 2
+                    print("!!! sem config_seguir_ik.json (use H com a pose atual)")
+            elif k == ord("h") and braco.arm is not None:   # H: pose atual
+                pedido = ("POSE ATUAL (a mao)", np.asarray(braco.arm.get_positions(), dtype=float))
     finally:
         braco.encerrar()
         cap.release(); cv2.destroyAllWindows()
