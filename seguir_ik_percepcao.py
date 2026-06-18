@@ -981,6 +981,9 @@ def main():
                          ik=[bool(ik_ok), int(ik_iters), round(float(ik_ms), 2)],
                          jump=(round(jump, 1) if jump is not None else None),
                          st=status, sg=[sinal_pan, sinal_tilt],
+                         fonte=fonte_alvo, npes=est_p["n_rostos"],
+                         reid=(None if not par["reid_on"] or reid is None else
+                               [bool(reid.alvo_presente), round(reid.alvo_sim, 2)]),
                          par=[round(par["ganho"], 2), par["limite"], par["previsao"]])
 
             # ---- estado público p/ a web (websocket) ----

@@ -22,7 +22,7 @@ from insightface.app import FaceAnalysis
 DET_SIZE = (480, 480)
 LIMIAR = 0.35              # cosseno acima disso = "é a mesma pessoa"
 EMA = 0.1                 # quão rápido o embedding-alvo se adapta (luz/ângulo)
-TIMEOUT = 1.5             # s sem ver o alvo → considera "ausente"
+TIMEOUT = 3.0             # s sem ver o alvo → considera "ausente" (folgado p/ gaps do worker)
 
 
 def make_providers(dispositivo):
@@ -94,10 +94,15 @@ class ReID:
         return self.tem_alvo and (time.time() - self.alvo_visto) < TIMEOUT
 
     def idx_alvo(self, bboxes):
-        """Dado os bboxes (x1,y1,x2,y2) do loop rápido, devolve o índice do que é o ALVO
-        (o mais próximo do último bbox do alvo), ou None se o alvo não está presente."""
-        if not self.alvo_presente or self.alvo_bbox is None or len(bboxes) == 0:
+        """Dado os bboxes (x1,y1,x2,y2) do loop rápido, devolve o índice do que é o ALVO.
+        Com UM rosto só (você sozinho) segue direto — re-ID só desambigua quando há vários,
+        que é onde ele importa; assim não fica "perdido" piscando quando você está sozinho."""
+        if len(bboxes) == 0:
             return None
+        if len(bboxes) == 1:
+            return 0                                    # 1 pessoa = é ela (sem exigir match)
+        if not self.alvo_presente or self.alvo_bbox is None:
+            return None                                 # vários e sem confirmação → não chuta estranho
         ca = _centro(self.alvo_bbox)
         diag = max(1.0, (self.alvo_bbox[2] - self.alvo_bbox[0]))
         melhor, dmin = None, 1e9
@@ -106,7 +111,7 @@ class ReID:
             d = ((c[0] - ca[0]) ** 2 + (c[1] - ca[1]) ** 2) ** 0.5
             if d < dmin:
                 dmin, melhor = d, i
-        return melhor if dmin < diag * 1.5 else None   # só se razoavelmente perto
+        return melhor if dmin < diag * 1.5 else None    # só se razoavelmente perto
 
     def encerrar(self):
         self._stop = True
