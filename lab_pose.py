@@ -215,6 +215,7 @@ def main():
     t0 = time.time()
     t_log = 0.0          # throttle do snapshot periódico
     sig_prev = None      # p/ logar transições (corpo/postura/distância)
+    usar_pose, usar_maos = True, True   # 'b' liga/desliga corpo, 'm' liga/desliga mãos
     try:
         while True:
             ok, frame = cap.read()
@@ -225,26 +226,30 @@ def main():
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
             ts = int((time.time() - t0) * 1000)
-            with med.estagio("pose"):
-                res = landmarker.detect_for_video(mp_img, ts)
-            with med.estagio("maos"):
-                res_m = hand_lm.detect_for_video(mp_img, ts)
+            res = res_m = None
+            if usar_pose:
+                with med.estagio("pose"):
+                    res = landmarker.detect_for_video(mp_img, ts)
+            if usar_maos:
+                with med.estagio("maos"):
+                    res_m = hand_lm.detect_for_video(mp_img, ts)
 
             modo = "FLUTUANDO (posicione com a mao)" if est["livre"] else "TRAVADO"
             linhas = [(f"FPS {med.fps():.0f}   pose {med.media_ms('pose'):.0f}ms  "
                        f"maos {med.media_ms('maos'):.0f}ms   {w}x{h}", (0, 255, 180)),
-                      (f"{modo}   [ESPACO trava | f flutua | ESC pousa+sai]",
+                      (f"{modo}   corpo(b):{'ON' if usar_pose else 'off'} "
+                       f"maos(m):{'ON' if usar_maos else 'off'}   [ESPACO trava | f | ESC sai]",
                        (120, 200, 255) if est["livre"] else (120, 235, 120))]
             # mãos: desenha + conta dedos + handedness (esq/dir)
             dedos, lados = [], []
-            if res_m.hand_landmarks:
+            if res_m and res_m.hand_landmarks:
                 desenha_maos(frame, res_m.hand_landmarks, w, h)
                 dedos = [conta_dedos(hd) for hd in res_m.hand_landmarks]
                 lados = [c[0].category_name for c in res_m.handedness] if res_m.handedness else []
             linhas.append((f"maos: {len(dedos)}  dedos levantados: {dedos}  {lados}",
                            (0, 200, 255) if dedos else (130, 130, 130)))
             info = {}
-            if res.pose_landmarks:
+            if res and res.pose_landmarks:
                 lms = res.pose_landmarks[0]
                 desenha(frame, lms, w, h)
                 info = analisa(lms, w, h)
@@ -260,7 +265,7 @@ def main():
                 linhas.append(("nenhum corpo no quadro", (120, 120, 245)))
 
             # ---- log JSONL: snapshot a ~2 Hz + sempre que muda um sinal-chave ----
-            corpo = bool(res.pose_landmarks)
+            corpo = bool(res and res.pose_landmarks)
             sig = (corpo, info.get("postura"), info.get("dist"),
                    info.get("olhar"), info.get("virado"), tuple(dedos))
             agora = time.time()
@@ -280,6 +285,10 @@ def main():
                 travar()
             elif k == ord("f"):               # f: volta a flutuar
                 flutuar()
+            elif k == ord("b"):               # b: liga/desliga o CORPO (pose)
+                usar_pose = not usar_pose
+            elif k == ord("m"):               # m: liga/desliga as MAOS
+                usar_maos = not usar_maos
     finally:
         print("--- pousando no repouso (APOIE o braço) ---")
         try:
