@@ -32,6 +32,7 @@ POSE_URL = ("https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
 OMB_E, OMB_D = 11, 12
 QUAD_E, QUAD_D, JOE_E, JOE_D = 23, 24, 25, 26
 VIS_MIN = 0.5
+CORPO_CONF = 0.7      # confiança mínima dos ombros p/ ACEITAR o corpo como alvo (anti-objeto)
 
 
 def _baixar(url, nome):
@@ -54,7 +55,10 @@ class Percepcao:
             mdl = _baixar(POSE_URL, "pose_landmarker_lite.task")
             self.pose = vision.PoseLandmarker.create_from_options(vision.PoseLandmarkerOptions(
                 base_options=mp_python.BaseOptions(model_asset_path=mdl),
-                running_mode=vision.RunningMode.VIDEO, num_poses=1))
+                running_mode=vision.RunningMode.VIDEO, num_poses=1,
+                min_pose_detection_confidence=0.7,    # menos "corpo" alucinado em objetos
+                min_pose_presence_confidence=0.7,
+                min_tracking_confidence=0.6))
 
     @staticmethod
     def _vis(lms, i):
@@ -72,12 +76,13 @@ class Percepcao:
             return "PERTO" if larg > w * 0.28 else "LONGE" if larg < w * 0.16 else "media"
         return None
 
-    def processa(self, frame_bgr, ts_ms):
-        """Devolve um dict com o ALVO + sinais. `_lms` (pose) sai junto p/ desenho."""
+    def processa(self, frame_bgr, ts_ms, usar_corpo=True):
+        """Devolve um dict com o ALVO + sinais. `_lms` (pose) sai junto p/ desenho.
+        usar_corpo=False -> só rosto (não roda o Pose; sem alvo de corpo)."""
         h, w = frame_bgr.shape[:2]
         faces = self.detector.detectar(frame_bgr, escala=0.5)
         lms = None
-        if self.pose is not None:
+        if self.pose is not None and usar_corpo:
             rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
             res = self.pose.detect_for_video(
                 mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb), ts_ms)
@@ -87,7 +92,8 @@ class Percepcao:
         if faces:
             rosto = max(faces, key=lambda f: f.area)
             alvo, fonte = rosto.centro_olhos, "rosto"
-        elif lms is not None and self._vis(lms, OMB_E) and self._vis(lms, OMB_D):
+        elif (lms is not None and lms[OMB_E].visibility >= CORPO_CONF
+              and lms[OMB_D].visibility >= CORPO_CONF):     # confiança ALTA → anti-objeto
             cx = (lms[OMB_E].x + lms[OMB_D].x) / 2 * w
             cy = (lms[OMB_E].y + lms[OMB_D].y) / 2 * h
             larg = abs(lms[OMB_E].x - lms[OMB_D].x) * w     # mira acima dos ombros (cabeça)

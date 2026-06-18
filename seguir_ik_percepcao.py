@@ -152,6 +152,8 @@ def par_default():
         "procurar_on": True, "curioso_on": True, "respirar_on": True,
         "respirar_amp": RESPIRAR_AMP, "parado_s": PARADO_S, "cooldown_s": COOLDOWN_S,
         "vel_parado": VEL_PARADO,
+        # percepção/gestos (toggles dinâmicos)
+        "seguir_corpo": True, "gestos_on": True,
     }
 
 
@@ -183,6 +185,8 @@ AJUSTES_SPEC = [
     ("COMPORTAMENTOS", "vel_parado",   "limiar 'parado'",    10,  20,  300,  "px"),
     ("COMPORTAMENTOS", "respirar_on",  "respirar",            0,   0,    1,  "bool"),
     ("COMPORTAMENTOS", "respirar_amp", "intensidade respiro", 0.2, 0.0, 4.0, "f1"),
+    ("COMPORTAMENTOS", "seguir_corpo", "seguir pelo corpo",     0,   0,    1,  "bool"),
+    ("COMPORTAMENTOS", "gestos_on",    "gestos ligados",        0,   0,    1,  "bool"),
 ]
 
 
@@ -391,6 +395,8 @@ def main():
 
     def tocar_gesto_tipo(tipo):
         """Seleciona um tipo e dispara com a config DELE (cada gesto tem a sua)."""
+        if not par.get("gestos_on", True):       # toggle dinâmico: gestos desligados
+            return
         gp = par["gestos"][tipo]
         par["gesto_tipo"] = tipo
         log_evento(f"Gesto: {tipo}", "info")
@@ -716,7 +722,8 @@ def main():
 
             # ---- PERCEPÇÃO: o ALVO é o rosto; se a cabeça sai, vira o CORPO (cabeça
             # estimada acima dos ombros) → não perde a pessoa quando senta/levanta/cobre. ----
-            est_p = perc.processa(frame, int((time.time() - t_perc0) * 1000))
+            est_p = perc.processa(frame, int((time.time() - t_perc0) * 1000),
+                                  usar_corpo=par["seguir_corpo"])
             alvo_face = est_p["rosto"]              # p/ desenhar a caixa do rosto
             fonte_alvo = est_p["fonte"]             # "rosto" | "corpo" | None
             ponto_cru = est_p["alvo"]               # ALVO (rosto -> corpo -> None)
