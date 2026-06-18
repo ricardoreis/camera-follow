@@ -334,6 +334,8 @@ def main():
     altura = 0.0               # deslocamento vertical da câmera (m) — acompanha sua altura
     sinal_altura = 1.0         # sentido (deduzido da geometria ao travar/acordar)
     n_falhas = 0               # IK seguidas falhando (p/ destravar quando preso)
+    alt_teto_cima = 0.5        # teto adaptativo da altura p/ CIMA (m): aprende se o IK falha
+    alt_teto_baixo = 0.5       # teto adaptativo p/ BAIXO (m)
     t_prev = time.time()       # p/ o dt do integrador lento da altura
     auto_estado = "seguindo"   # seguindo | perseguindo | varrendo | ocioso
     auto_seta = 0.0            # direção da saída (p/ HUD)
@@ -765,7 +767,9 @@ def main():
                 # câmera devagar pra re-nivelar o olhar (você na altura dos olhos).
                 if par["altura_on"] and abs(base_tilt) > np.radians(par["altura_zona"]):
                     altura += par["altura_ganho"] * sinal_altura * base_tilt * dt_frame
-                    altura = float(np.clip(altura, -par["alt_max"], par["alt_max"]))
+                    lim_c = min(par["alt_max"], alt_teto_cima)    # teto = min(config, alcançável)
+                    lim_b = min(par["alt_max"], alt_teto_baixo)
+                    altura = float(np.clip(altura, -lim_b, lim_c))
 
             # ---- FUGA/perseguição: se o rosto SUMIU, vai pro lado que você saiu e
             # espera; se está presente, devolve a mira sem mexer (o servo comanda).
@@ -851,28 +855,65 @@ def main():
                     est["q_target"][:] = q_ik                # comando = IK + pescoço + gesto
                     ik_ok = True
                     n_falhas = 0
+                    # relaxa o teto adaptativo DEVAGAR (re-testa subir mais), só se NÃO no limite
+                    if altura < 0.7 * alt_teto_cima:
+                        alt_teto_cima = min(0.5, alt_teto_cima + 0.004)
+                    if -altura < 0.7 * alt_teto_baixo:
+                        alt_teto_baixo = min(0.5, alt_teto_baixo + 0.004)
                 else:
                     ik_ok = False
                     n_falhas += 1
-                    if n_falhas <= FALHAS_MAX:    # falha isolada → SEGURA (desfaz o passo)
+                    # RECUPERA baixando SÓ a altura (mantendo pan/tilt + seed LOCAL q_ref):
+                    # sem ir pro HOME, sem solavanco. E APRENDE o teto alcançável.
+                    passo_alt = 0.01 if altura >= 0 else -0.01   # recolhe 1cm rumo a 0
+                    alt_r, achou = altura, None
+                    for _ in range(25):
+                        alt_r -= passo_alt
+                        if (altura >= 0 and alt_r <= 0) or (altura < 0 and alt_r >= 0):
+                            alt_r = 0.0
+                        qx, okx, _, _ = resolver_ik(geom, base_ik + dpan + idle_pan,
+                                                    base_tilt + dtilt + idle_tilt, q_ref,
+                                                    alt_r, roll, dreach)
+                        if okx and np.degrees(np.max(np.abs(qx - q_ref))) <= IK_FLIP_DEG:
+                            achou = (qx, alt_r); break
+                        if alt_r == 0.0:
+                            break
+                    if achou is not None:                    # a ALTURA era a culpada → recolhe suave
+                        qx, alt_r = achou
+                        if altura >= 0:
+                            alt_teto_cima = max(0.0, abs(alt_r))
+                        else:
+                            alt_teto_baixo = max(0.0, abs(alt_r))
+                        altura = alt_r
+                        np.clip(qx, _LO + margem, _HI - margem, out=qx)
+                        q_ref[:] = qx
+                        qx[PESCOCO_J5] = float(np.clip(
+                            qx[PESCOCO_J5] + par["sinal_neck"] * neck,
+                            _LO[PESCOCO_J5] + margem, _HI[PESCOCO_J5] - margem))
+                        for idx, val in dq.items():
+                            qx[idx] = float(np.clip(qx[idx] + val,
+                                                    _LO[idx] + margem, _HI[idx] - margem))
+                        est["q_target"][:] = qx
+                        n_falhas = 0
+                        diario.evento("ik_teto_altura", alt_cm=round(alt_r * 100, 1),
+                                      teto_cima_cm=round(alt_teto_cima * 100, 1))
+                    else:                                    # não era a altura → desfaz a mira (suave)
                         base_pan, base_tilt, altura = prev_pan, prev_tilt, prev_altura
-                    else:                          # PRESO → recua a mira/altura e caminha
-                        base_pan, base_tilt = prev_pan * 0.9, prev_tilt * 0.9   # rumo ao centro
-                        altura = prev_altura * 0.9
-                        pan_base *= 0.9
-                        q2, ok2, _, _ = resolver_ik(geom, pan_base, base_tilt,
-                                                    est["home"], altura)
-                        if ok2:
-                            np.clip(q2, _LO + margem, _HI - margem, out=q2)
-                            passo = np.radians(3.0)
-                            q_ref[:] += np.clip(q2 - q_ref, -passo, passo)
-                            est["q_target"][:] = q_ref
-                            if np.degrees(np.max(np.abs(q2 - q_ref))) < 2.0:
-                                n_falhas = 0       # destravou
-                        diario.evento("ik_destravando",
-                                      pan=round(float(np.degrees(base_pan)), 1),
-                                      tilt=round(float(np.degrees(base_tilt)), 1),
-                                      altura=round(altura, 3))
+                        if n_falhas > FALHAS_MAX:            # fallback raro: recua ao centro (seed LOCAL)
+                            base_pan, base_tilt = prev_pan * 0.9, prev_tilt * 0.9
+                            pan_base *= 0.9
+                            altura = prev_altura * 0.9
+                            q2, ok2, _, _ = resolver_ik(geom, pan_base, base_tilt, q_ref, altura)
+                            if ok2:
+                                np.clip(q2, _LO + margem, _HI - margem, out=q2)
+                                passo = np.radians(3.0)
+                                q_ref[:] += np.clip(q2 - q_ref, -passo, passo)
+                                est["q_target"][:] = q_ref
+                                if np.degrees(np.max(np.abs(q2 - q_ref))) < 2.0:
+                                    n_falhas = 0
+                            diario.evento("ik_destravando",
+                                          pan=round(float(np.degrees(base_pan)), 1),
+                                          altura=round(altura, 3))
 
             # ---- telemetria por frame ----
             diario.frame(i=frame_idx, fase=fase, trk=bool(tracking and not fault_ativo),
