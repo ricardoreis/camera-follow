@@ -83,10 +83,10 @@ class Percepcao:
                 mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb), ts_ms)
             lms = res.pose_landmarks[0] if res.pose_landmarks else None
 
-        alvo, fonte = None, None
+        alvo, fonte, rosto = None, None, None
         if faces:
-            f = max(faces, key=lambda f: f.area)
-            alvo, fonte = f.centro_olhos, "rosto"
+            rosto = max(faces, key=lambda f: f.area)
+            alvo, fonte = rosto.centro_olhos, "rosto"
         elif lms is not None and self._vis(lms, OMB_E) and self._vis(lms, OMB_D):
             cx = (lms[OMB_E].x + lms[OMB_D].x) / 2 * w
             cy = (lms[OMB_E].y + lms[OMB_D].y) / 2 * h
@@ -94,7 +94,7 @@ class Percepcao:
             alvo, fonte = (int(cx), int(cy - larg * 0.6)), "corpo"
 
         return {
-            "alvo": alvo, "fonte": fonte,
+            "alvo": alvo, "fonte": fonte, "rosto": rosto,
             "n_rostos": len(faces),
             "tem_rosto": bool(faces),
             "tem_corpo": lms is not None,
