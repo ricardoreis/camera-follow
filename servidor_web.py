@@ -18,7 +18,8 @@ import time
 import cv2
 
 from fastapi import FastAPI, WebSocket
-from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
+from fastapi.responses import (StreamingResponse, JSONResponse, HTMLResponse,
+                               FileResponse)
 from fastapi.staticfiles import StaticFiles
 from starlette.websockets import WebSocketDisconnect
 
@@ -88,9 +89,19 @@ def criar_app(spec=None):
         except (WebSocketDisconnect, RuntimeError):
             pass
 
-    # O React build (se existir) é servido na raiz; senão, página de fallback.
+    # O React build (se existir): os ASSETS com hash são imutáveis (cacheáveis), mas o
+    # index.html vai com NO-CACHE — senão o navegador guarda um index antigo que aponta
+    # pra um JS de hash já apagado pelo rebuild → script 404 → PÁGINA EM BRANCO.
     if os.path.isdir(WEB_DIST):
-        app.mount("/", StaticFiles(directory=WEB_DIST, html=True), name="web")
+        assets = os.path.join(WEB_DIST, "assets")
+        if os.path.isdir(assets):
+            app.mount("/assets", StaticFiles(directory=assets), name="assets")
+
+        @app.get("/")
+        def raiz():
+            return FileResponse(
+                os.path.join(WEB_DIST, "index.html"),
+                headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
     else:
         @app.get("/")
         def raiz():

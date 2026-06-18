@@ -378,6 +378,8 @@ def main():
     fault_ativo = False        # algum motor falhou (LED vermelho) → congela e avisa
     frame_idx = 0
     mostra_overlay = True
+    # --noHUD: começa sem o painel de TEXTO (só os gráficos de tracking). Toggle: tecla 'h'.
+    mostra_hud = not any(a.lower() in ("--nohud", "--no-hud") for a in sys.argv)
     toast = [None]
     eventos = deque(maxlen=80)     # log de alto nível ("cérebro") p/ o terminal da web
     _ev = [0]
@@ -1096,7 +1098,8 @@ def main():
                     ]
                 # web: frame com overlays geométricos, SEM o painel de texto (vira HTML)
                 ESTADO.publicar_frame(frame.copy())
-                painel(frame, 8, 8, linhas, escala=0.5)
+                if mostra_hud or modo_ajuste:    # --noHUD esconde o texto; AJUSTE (TAB) sempre aparece
+                    painel(frame, 8, 8, linhas, escala=0.5)
             else:
                 ESTADO.publicar_frame(frame.copy())   # overlays escondidos: frame cru
 
@@ -1190,6 +1193,8 @@ def main():
                     aviso("Marque o repouso flutuando ('f' volta a flutuar)", COR_AVISO)
             elif k == ord("i"):
                 mostra_overlay = not mostra_overlay
+            elif k == ord("h"):              # liga/desliga o painel de TEXTO (--noHUD)
+                mostra_hud = not mostra_hud
 
     finally:
         print("\n--- encerrando: desligando torque (APOIE o braço) ---")
