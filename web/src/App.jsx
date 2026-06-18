@@ -140,6 +140,21 @@ function Metric({ label, value, ok }) {
     </div>
   )
 }
+function ReidBadge({ reid }) {
+  if (!reid) return (
+    <div className="mt-2 flex items-center justify-between rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 text-sm">
+      <span className="font-semibold text-gray-500">re-ID (não trocar de pessoa)</span>
+      <span className="font-medium text-gray-400">desligado</span>
+    </div>
+  )
+  const ok = reid.presente
+  return (
+    <div className={`mt-2 flex items-center justify-between rounded-xl border px-3 py-2 text-sm ${ok ? 'border-emerald-200 bg-emerald-50' : 'border-amber-200 bg-amber-50'}`}>
+      <span className="font-semibold text-gray-700">re-ID · {ok ? 'travado em VOCÊ' : 'pessoa sumiu'}</span>
+      <span className={`font-mono font-semibold ${ok ? 'text-emerald-600' : 'text-amber-600'}`}>sim {Number(reid.sim).toFixed(2)}</span>
+    </div>
+  )
+}
 function MiniBtn({ children, onClick, title }) {
   return (
     <button onClick={onClick} title={title}
@@ -397,6 +412,7 @@ export default function App() {
                     <Metric label="Pan / Tilt" value={`${e.pan ?? 0}° / ${e.tilt ?? 0}°`} />
                     <Metric label="IK" value={e.ik_ok ? `${e.ik_ms} ms` : 'revertido'} ok={e.ik_ok} />
                   </div>
+                  <ReidBadge reid={e.reid} />
                   <div className="mt-2 rounded-xl border border-gray-200 bg-white px-3 py-2">
                     <div className="mb-1 flex justify-between text-[11px] text-gray-400">
                       <span>erro (px)</span><span>{e.erro ? `${e.erro[0]}, ${e.erro[1]}` : '—'}</span>

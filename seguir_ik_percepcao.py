@@ -128,13 +128,13 @@ CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # Config PADRÃO de cada gesto (amp graus, vel/hold s, curioso=entra na curiosidade).
 # Cada TIPO guarda a SUA config — editar um não mexe nos outros.
 GESTO_DEF = {
-    "single":    {"amp": 25.0, "vel": 0.30, "hold": 0.9,  "volta": 0.5, "curioso": True},
-    "swing":     {"amp": 22.0, "vel": 0.25, "hold": 0.4,  "volta": 0.5, "curioso": True},
-    "sim":       {"amp": 12.0, "vel": 0.22, "hold": 0.15, "volta": 0.4, "curioso": True},
-    "nao":       {"amp": 14.0, "vel": 0.22, "hold": 0.15, "volta": 0.4, "curioso": False},
-    "feliz":     {"amp": 10.0, "vel": 0.18, "hold": 0.10, "volta": 0.4, "curioso": True},
-    "dancar":    {"amp": 12.0, "vel": 0.22, "hold": 0.10, "volta": 0.4, "curioso": False},
-    "espreitar": {"amp": 25.0, "vel": 0.50, "hold": 0.70, "volta": 0.7, "curioso": True},
+    "single":    {"amp": 25.0, "vel": 0.30, "hold": 0.9,  "volta": 0.5, "segue": True,  "curioso": True},
+    "swing":     {"amp": 22.0, "vel": 0.25, "hold": 0.4,  "volta": 0.5, "segue": True,  "curioso": True},
+    "sim":       {"amp": 12.0, "vel": 0.22, "hold": 0.15, "volta": 0.4, "segue": False, "curioso": True},
+    "nao":       {"amp": 14.0, "vel": 0.22, "hold": 0.15, "volta": 0.4, "segue": False, "curioso": False},
+    "feliz":     {"amp": 10.0, "vel": 0.18, "hold": 0.10, "volta": 0.4, "segue": False, "curioso": True},
+    "dancar":    {"amp": 12.0, "vel": 0.22, "hold": 0.10, "volta": 0.4, "segue": False, "curioso": False},
+    "espreitar": {"amp": 25.0, "vel": 0.50, "hold": 0.70, "volta": 0.7, "segue": True,  "curioso": True},
 }
 
 
@@ -179,6 +179,7 @@ AJUSTES_SPEC = [
     ("GESTOS",   "g_vel",        "velocidade",       0.05, 0.10,  1.50, "f2s"),
     ("GESTOS",   "g_hold",       "hold",              0.1, 0.0,   4.0,  "f1s"),
     ("GESTOS",   "g_volta",      "velocidade volta",  0.05, 0.05,  3.0, "f2s"),
+    ("GESTOS",   "g_segue",      "segue ao gesticular", 0,   0,     1,  "bool"),
     ("GESTOS",   "g_curioso",    "usa na curiosidade",  0,   0,     1,  "bool"),
     ("COMPORTAMENTOS", "procurar_on",  "procurar (fuga+varredura)", 0, 0, 1, "bool"),
     ("COMPORTAMENTOS", "curioso_on",   "curiosidade",         0,   0,    1,  "bool"),
@@ -365,6 +366,7 @@ def main():
     autonomia = Autonomia(max_step)
     curiosidade = Curiosidade()  # dispara um gesto sozinho quando você fica parado
     gesto_t0 = None            # gesto em andamento (None = nenhum); 'g'/1..7 disparam
+    gesto_segue = False        # gesto atual mantém o tracking ativo (não congela o servo)?
     gesto_dir = 1              # alterna o lado a cada disparo (single)
     gesto_tipo = "single"      # tipo do gesto em andamento
     gesto_params = {}          # snapshot dos params (amp/sobe/segura/dir) do disparo
@@ -403,11 +405,13 @@ def main():
         else:
             aviso("Trave a home (ESPACO) e calibre (k) antes de salvar", COR_AVISO)
 
-    def tocar_gesto(tipo, amp, vel, hold, volta=HT_DESCE):
-        """Dispara um gesto (tipo + params). 'volta' = tempo de VOLTA (descida)."""
-        nonlocal gesto_t0, gesto_dir, gesto_tipo, gesto_params
+    def tocar_gesto(tipo, amp, vel, hold, volta=HT_DESCE, segue=False):
+        """Dispara um gesto (tipo + params). 'volta' = tempo de VOLTA (descida).
+        'segue' = mantém o tracking ativo durante o gesto (não congela o servo)."""
+        nonlocal gesto_t0, gesto_dir, gesto_tipo, gesto_params, gesto_segue
         gesto_dir = -gesto_dir          # alterna o lado (single)
         gesto_tipo = tipo
+        gesto_segue = bool(segue)
         gesto_params = {"amp": amp, "sobe": vel, "segura": hold, "desce": volta,
                         "dir": gesto_dir}
         gesto_t0 = time.time()
@@ -419,7 +423,8 @@ def main():
         gp = par["gestos"][tipo]
         par["gesto_tipo"] = tipo
         log_evento(f"Gesto: {tipo}", "info")
-        tocar_gesto(tipo, gp["amp"], gp["vel"], gp["hold"], gp.get("volta", HT_DESCE))
+        tocar_gesto(tipo, gp["amp"], gp["vel"], gp["hold"], gp.get("volta", HT_DESCE),
+                    gp.get("segue", False))
 
     def aplicar_comando(cmd):
         """Aplica um comando vindo da WEB. Roda na thread do loop (seguro). No MVP só
@@ -788,9 +793,10 @@ def main():
             prev_pan, prev_tilt, prev_altura = base_pan, base_tilt, altura  # p/ DESFAZER
 
             # ---- SERVO VISUAL → mira (pan, tilt) ----
-            # Durante um head-tilt (gesto_t0) o pan/tilt CONGELA: a câmera rola sem
-            # perseguir o alvo (que sai do lugar por causa do roll na imagem).
-            if (fase == "seguir" and tracking and not fault_ativo and gesto_t0 is None
+            # Durante um gesto o pan/tilt normalmente CONGELA; mas gestos com "segue"=ON
+            # (ex.: espreitar, single/swing) mantêm o tracking ativo por baixo do gesto.
+            rastreia = (gesto_t0 is None) or gesto_segue
+            if (fase == "seguir" and tracking and not fault_ativo and rastreia
                     and ponto_cru is not None and prev is not None):
                 dx, dy = prev[0] - cx, prev[1] - cy
                 erro = (dx, dy)
@@ -814,14 +820,14 @@ def main():
             # (Não persegue durante um head-tilt — o roll some com o rosto na imagem.) ----
             autonomia.varredura_on = par["procurar_on"]
             if (fase == "seguir" and tracking and not fault_ativo and par["procurar_on"]
-                    and gesto_t0 is None):
+                    and rastreia):
                 base_pan, base_tilt, auto_estado, auto_seta = autonomia.update(
                     ponto_cru, prev, cx, cy, base_pan, base_tilt,
                     sinal_pan, sinal_tilt, radpx_x, radpx_y, lim, lim_tilt)
             else:
                 auto_estado = "seguindo"
 
-            if auto_estado != prev_auto and gesto_t0 is None:    # loga as transições
+            if auto_estado != prev_auto and rastreia:            # loga as transições
                 _nm = {"perseguindo": "Perdi você — perseguindo o canto",
                        "varrendo": "Procurando ao redor (varredura)",
                        "ocioso": "Ocioso — esperando você voltar",
