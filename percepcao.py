@@ -76,10 +76,12 @@ class Percepcao:
             return "PERTO" if larg > w * 0.28 else "LONGE" if larg < w * 0.16 else "media"
         return None
 
-    def processa(self, frame_bgr, ts_ms, usar_corpo=True, conf=CORPO_CONF):
+    def processa(self, frame_bgr, ts_ms, usar_corpo=True, conf=CORPO_CONF, reid=None):
         """Devolve um dict com o ALVO + sinais. `_lms` (pose) sai junto p/ desenho.
         usar_corpo=False -> só rosto (não roda o Pose). `conf` = confiança mínima dos
-        ombros p/ aceitar o corpo (ajustável ao vivo; maior = menos objeto virando corpo)."""
+        ombros p/ aceitar o corpo (ajustável ao vivo; maior = menos objeto virando corpo).
+        `reid` (opcional): se travado, escolhe o rosto da PESSOA-ALVO (não troca de pessoa);
+        se a pessoa-alvo não está em cena, não segue estranho (alvo de rosto = None)."""
         h, w = frame_bgr.shape[:2]
         faces = self.detector.detectar(frame_bgr, escala=0.5)
         lms = None
@@ -91,8 +93,15 @@ class Percepcao:
 
         alvo, fonte, rosto = None, None, None
         if faces:
-            rosto = max(faces, key=lambda f: f.area)
-            alvo, fonte = rosto.centro_olhos, "rosto"
+            if reid is not None and reid.tem_alvo:           # re-ID: segue só a pessoa-alvo
+                idx = reid.idx_alvo([(f.x, f.y, f.x + f.w, f.y + f.h) for f in faces])
+                if idx is not None:
+                    rosto = faces[idx]
+                    alvo, fonte = rosto.centro_olhos, "rosto"
+                # idx None -> alvo ausente: não segue estranho (alvo de rosto fica None)
+            else:
+                rosto = max(faces, key=lambda f: f.area)     # padrão: o mais próximo (maior)
+                alvo, fonte = rosto.centro_olhos, "rosto"
         elif (lms is not None and lms[OMB_E].visibility >= conf
               and lms[OMB_D].visibility >= conf):           # confiança ALTA → anti-objeto
             cx = (lms[OMB_E].x + lms[OMB_D].x) / 2 * w

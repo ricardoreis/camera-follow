@@ -154,7 +154,7 @@ def par_default():
         "respirar_amp": RESPIRAR_AMP, "parado_s": PARADO_S, "cooldown_s": COOLDOWN_S,
         "vel_parado": VEL_PARADO,
         # percepção/gestos (toggles dinâmicos)
-        "seguir_corpo": True, "gestos_on": True, "corpo_conf": 0.7,
+        "seguir_corpo": True, "gestos_on": True, "corpo_conf": 0.7, "reid_on": False,
     }
 
 
@@ -190,6 +190,7 @@ AJUSTES_SPEC = [
     ("COMPORTAMENTOS", "seguir_corpo", "seguir pelo corpo",     0,   0,    1,  "bool"),
     ("COMPORTAMENTOS", "gestos_on",    "gestos ligados",        0,   0,    1,  "bool"),
     ("COMPORTAMENTOS", "corpo_conf",   "confianca corpo",     0.05, 0.30, 0.95, "f2"),
+    ("COMPORTAMENTOS", "reid_on",      "re-ID (nao trocar)",    0,   0,    1,  "bool"),
 ]
 
 
@@ -294,6 +295,19 @@ def par_de_cfg(cfg):
     return par
 
 
+def _criar_reid(log):
+    """Cria o re-ID (ArcFace) sob demanda. Import aqui p/ não pesar o startup quando off."""
+    try:
+        log("re-ID: carregando ArcFace... (~2s)", "info")
+        from reid import ReID
+        r = ReID(dispositivo="ovcpu")
+        log("re-ID: pronto", "ok")
+        return r
+    except Exception as e:
+        log(f"re-ID indisponivel: {e}", "erro")
+        return None
+
+
 def main():
     os.makedirs(LOG_DIR, exist_ok=True)
     log_path = os.path.join(LOG_DIR, "ik_" + time.strftime("%Y%m%d_%H%M%S") + ".jsonl")
@@ -303,6 +317,8 @@ def main():
 
     perc = Percepcao(com_corpo=True)     # percepção: rosto (YuNet) + corpo (Pose) -> ALVO
     detector = perc.detector             # reusa o mesmo YuNet na calibração
+    reid = None                          # re-ID (ArcFace): criado sob demanda (1ª vez ~2s)
+    reid_prev = False                    # p/ detectar a borda "ligou re-ID" → trava na hora
     t_perc0 = time.time()                # base de tempo p/ o pose (modo VIDEO)
     rastreador = RastreadorAlvo(t_pred_ms=PREVISAO_MS)
     try:
@@ -723,10 +739,22 @@ def main():
                 ramp_repouso()
                 break
 
+            # ---- RE-ID (opcional): trava em VOCÊ e não troca quando outra pessoa entra ----
+            if par["reid_on"]:
+                if reid is None:
+                    reid = _criar_reid(log_evento)        # 1ª vez carrega o ArcFace (~2s)
+                if reid is not None:
+                    reid.submeter(frame)
+                    if not reid_prev:                     # acabou de ligar → trava em quem está
+                        reid.travar()
+                        log_evento("re-ID: travado na pessoa atual", "ok")
+            reid_prev = par["reid_on"]
+
             # ---- PERCEPÇÃO: o ALVO é o rosto; se a cabeça sai, vira o CORPO (cabeça
             # estimada acima dos ombros) → não perde a pessoa quando senta/levanta/cobre. ----
             est_p = perc.processa(frame, int((time.time() - t_perc0) * 1000),
-                                  usar_corpo=par["seguir_corpo"], conf=par["corpo_conf"])
+                                  usar_corpo=par["seguir_corpo"], conf=par["corpo_conf"],
+                                  reid=reid if par["reid_on"] else None)
             alvo_face = est_p["rosto"]              # p/ desenhar a caixa do rosto
             fonte_alvo = est_p["fonte"]             # "rosto" | "corpo" | None
             ponto_cru = est_p["alvo"]               # ALVO (rosto -> corpo -> None)
@@ -963,6 +991,8 @@ def main():
                 "tem_rosto": est_p["tem_rosto"], "fonte_alvo": fonte_alvo,
                 "n_pessoas": est_p["n_rostos"], "dist": est_p["dist"],
                 "postura": est_p["postura"],
+                "reid": (None if not par["reid_on"] or reid is None else
+                         {"presente": reid.alvo_presente, "sim": round(reid.alvo_sim, 2)}),
                 "erro": [int(erro[0]), int(erro[1])] if erro else None,
                 "pan": round(float(np.degrees(base_pan)), 1),
                 "tilt": round(float(np.degrees(base_tilt)), 1),
@@ -1026,7 +1056,9 @@ def main():
                         (ik_txt, COR_OK if ik_ok else COR_AVISO),
                         (f"erro: {('%+d,%+d px' % erro) if erro else '--'}", COR_TXT),
                         (f"ALVO: {(fonte_alvo or 'perdido').upper()}  pessoas: {est_p['n_rostos']}"
-                         f"  dist: {est_p['dist'] or '?'}  postura: {est_p['postura'] or '?'}",
+                         f"  dist: {est_p['dist'] or '?'}  postura: {est_p['postura'] or '?'}"
+                         + ("" if not par["reid_on"] or reid is None else
+                            f"  re-ID: {'VOCE' if reid.alvo_presente else 'sumiu'} {reid.alvo_sim:.2f}"),
                          (0, 180, 255) if fonte_alvo == "corpo"
                          else COR_OK if fonte_alvo == "rosto" else COR_DIM),
                         (f"ganho={par['ganho']:.2f}  zona={par['zona']}px  "
