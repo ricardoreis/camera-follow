@@ -74,7 +74,7 @@ def salvar_db(cadastrados):
 
 
 def main():
-    dispositivo = sys.argv[1].lower() if len(sys.argv) > 1 else "cpu"
+    dispositivo = sys.argv[1].lower() if len(sys.argv) > 1 else "ovcpu"   # OpenVINO-CPU (mais rápido)
     pack = "buffalo_l" if (len(sys.argv) > 2 and sys.argv[2].lower() == "l") else "buffalo_s"
     providers = make_providers(dispositivo)
 
