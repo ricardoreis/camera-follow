@@ -27,6 +27,7 @@ web/dist/
 .venv-labs/
 models_labs/
 logs_labs/
+cadastros_identidade.json   # embeddings de rosto (dado biométrico, NÃO versionar)
 
 # Editores / SO
 .vscode/

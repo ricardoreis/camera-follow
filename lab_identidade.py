@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 """lab_identidade.py — LAB 2 (IDENTIDADE + CONTAGEM de pessoas).
 
-InsightFace (RetinaFace + ArcFace 512-d): detecta TODOS os rostos do quadro (conta gente),
-dá idade/gênero, e RECONHECE quem você cadastrar (tecla 'c') por similaridade de cosseno.
-Acorda + flutua o braço (lab_braco) p/ você enquadrar a câmera.
+InsightFace (RetinaFace/SCRFD + ArcFace): detecta TODOS os rostos (conta gente), dá
+idade/gênero, e RECONHECE quem você cadastrar (tecla 'c' → digita o nome no terminal),
+por similaridade de cosseno. Os cadastros são SALVOS em cadastros_identidade.json (uma
+"mini base de dados" local) e recarregados ao abrir. Acorda+flutua o braço p/ enquadrar.
 
-Rodar:  .venv-labs/bin/python lab_identidade.py            (CPU)
-        .venv-labs/bin/python lab_identidade.py openvino   (NPU/iGPU; exige onnxruntime-openvino)
+Rodar:  .venv-labs/bin/python lab_identidade.py [dispositivo] [pack]
+  dispositivo: cpu (padrão) | ovcpu | gpu | npu     (gpu/npu exigem drivers Intel no Linux)
+  pack:        s (padrão, buffalo_s, rápido) | l (buffalo_l, preciso/pesado)
 
-Teclas: c cadastra o maior rosto | x limpa cadastros | ESPACO trava | f flutua | ESC sai.
+Teclas: c cadastra (digite o nome no terminal) | d apaga o último | x limpa tudo |
+        ESPACO trava | f flutua | ESC pousa+sai.
 """
 
+import json
+import os
 import sys
 import time
 
@@ -23,15 +28,40 @@ from lab_bench import Medidor, hud, Registro
 from lab_braco import Braco
 
 CAMERA = "C920"
-LIMIAR = 0.35              # similaridade de cosseno p/ "mesma pessoa" (ArcFace)
-DET_SIZE = (640, 640)
-PROVIDERS = {"cpu": ["CPUExecutionProvider"],
-             "openvino": ["OpenVINOExecutionProvider", "CPUExecutionProvider"]}
+LIMIAR = 0.35
+DET_SIZE = (480, 480)
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cadastros_identidade.json")
+
+
+def make_providers(dispositivo):
+    """Lista de providers do onnxruntime conforme o dispositivo pedido."""
+    d = dispositivo.lower()
+    if d == "cpu":
+        return ["CPUExecutionProvider"]
+    dev = {"ovcpu": "CPU", "gpu": "GPU", "npu": "NPU"}.get(d)
+    if dev:
+        return [("OpenVINOExecutionProvider", {"device_type": dev}), "CPUExecutionProvider"]
+    return ["CPUExecutionProvider"]
+
+
+def carregar_db():
+    if not os.path.exists(DB_PATH):
+        return []
+    try:
+        data = json.load(open(DB_PATH))
+        return [(e["nome"], np.asarray(e["emb"], dtype=np.float32)) for e in data]
+    except Exception:
+        return []
+
+
+def salvar_db(cadastrados):
+    json.dump([{"nome": n, "emb": e.tolist()} for n, e in cadastrados], open(DB_PATH, "w"))
 
 
 def main():
-    prov = sys.argv[1].lower() if len(sys.argv) > 1 else "cpu"
-    providers = PROVIDERS.get(prov, PROVIDERS["cpu"])
+    dispositivo = sys.argv[1].lower() if len(sys.argv) > 1 else "cpu"
+    pack = "buffalo_l" if (len(sys.argv) > 2 and sys.argv[2].lower() == "l") else "buffalo_s"
+    providers = make_providers(dispositivo)
 
     try:
         cap, idx = camera.abrir_camera(CAMERA)
@@ -46,18 +76,21 @@ def main():
     braco = Braco(cap, janela)
     braco.iniciar()
 
-    print(f"--- carregando InsightFace (buffalo_l, {prov}) ---")
-    app = FaceAnalysis(name="buffalo_l", providers=providers)
+    print(f"--- carregando InsightFace ({pack}, {dispositivo}) ---")
+    app = FaceAnalysis(name=pack, allowed_modules=["detection", "recognition", "genderage"],
+                       providers=providers)
     app.prepare(ctx_id=0, det_size=DET_SIZE)
     try:
         prov_real = app.models["detection"].session.get_providers()[0]
     except Exception:
         prov_real = providers[0]
 
-    cadastrados = []          # [(nome, normed_embedding)]
+    cadastrados = carregar_db()
+    print(f"--- {len(cadastrados)} cadastro(s) carregado(s): {[n for n,_ in cadastrados]} ---")
     med = Medidor()
     reg = Registro("identidade")
-    reg.linha(tipo="inicio", lab="identidade", modelo="buffalo_l", provider=prov_real)
+    reg.linha(tipo="inicio", lab="identidade", pack=pack, dispositivo=dispositivo,
+              provider=prov_real)
     t_log = 0.0
 
     try:
@@ -67,9 +100,9 @@ def main():
                 break
             med.frame()
             with med.estagio("face"):
-                faces = app.get(frame)             # InsightFace usa BGR (cv2) direto
+                faces = app.get(frame)
             faces.sort(key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]),
-                       reverse=True)               # maior (mais perto) primeiro
+                       reverse=True)
 
             pessoas = []
             for f in faces:
@@ -92,12 +125,12 @@ def main():
                 pessoas.append({"nome": nome, "sim": round(sim, 2), "idade": idade, "sexo": sexo})
 
             linhas = [
-                (f"FPS {med.fps():.0f}   face {med.media_ms('face'):.0f}ms   prov: {prov_real}",
-                 (0, 255, 180)),
-                (f"PESSOAS NO QUADRO: {len(faces)}    cadastrados: {len(cadastrados)}",
-                 (235, 225, 130)),
-                (f"{'FLUTUANDO' if braco.livre else 'TRAVADO'}   "
-                 "c cadastra | x limpa | ESPACO trava | f flutua | ESC sai", (150, 150, 150)),
+                (f"FPS {med.fps():.0f}   face {med.media_ms('face'):.0f}ms   "
+                 f"{pack} @ {prov_real}", (0, 255, 180)),
+                (f"PESSOAS NO QUADRO: {len(faces)}    cadastrados: {len(cadastrados)} "
+                 f"{[n for n,_ in cadastrados][:5]}", (235, 225, 130)),
+                (f"{'FLUTUANDO' if braco.livre else 'TRAVADO'}   c cadastra (nome no terminal) | "
+                 "d apaga | x limpa | ESPACO trava | f flutua | ESC sai", (150, 150, 150)),
             ]
             hud(frame, linhas)
             cv2.imshow(janela, frame)
@@ -111,11 +144,20 @@ def main():
             k = cv2.waitKey(1) & 0xFF
             if k == 27:                           # ESC
                 break
-            elif k == ord("c") and faces:         # cadastra o maior rosto
-                cadastrados.append((f"P{len(cadastrados) + 1}", faces[0].normed_embedding.copy()))
-                print(f"--- cadastrado P{len(cadastrados)} ---")
-            elif k == ord("x"):                   # limpa cadastros
+            elif k == ord("c") and faces:         # cadastra o maior rosto (nome no terminal)
+                emb = faces[0].normed_embedding.copy().astype(np.float32)
+                nome = input(">>> Nome da pessoa (ENTER cancela): ").strip()
+                if nome:
+                    cadastrados.append((nome, emb))
+                    salvar_db(cadastrados)
+                    print(f"--- cadastrado: {nome}  (total {len(cadastrados)}) ---")
+            elif k == ord("d") and cadastrados:   # apaga o último
+                rem = cadastrados.pop()
+                salvar_db(cadastrados)
+                print(f"--- removido: {rem[0]} ---")
+            elif k == ord("x"):                   # limpa tudo
                 cadastrados.clear()
+                salvar_db(cadastrados)
                 print("--- cadastros limpos ---")
             elif k == 32:                         # ESPACO trava
                 braco.travar()
