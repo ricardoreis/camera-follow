@@ -73,7 +73,10 @@ principal fica intacto. Os labs só dependem de `camera.py` (OpenCV) — fácil 
 ## Dependências (instaladas por lab, sob demanda, no `.venv-labs`)
 `mediapipe` (labs 1/3/4), `insightface`+`onnxruntime` (lab 2), `hsemotion`/`deepface`
 (lab 4), `onnxruntime-openvino` (comparação NPU/iGPU). Modelos `.onnx`/`.task` baixam na
-1ª execução → **gitignore** (não versionar os pesos).
+1ª execução → **gitignore** (não versionar os pesos). O **`lab_pose.py`** também controla
+o braço (acorda+flutua p/ você enquadrar a câmera), então o `.venv-labs` ganhou também
+`pin` (pinocchio) + `motorbridge` + `pyyaml` (mesmas versões do `.venv`) — confirmado que
+convivem com o mediapipe (numpy 2.4.6). O `reBotArm_control_py` entra via `sys.path`.
 
 ## Verificação / entregáveis
 - Cada lab: roda ao vivo (overlay + fps), grava um **resumo** (tabela CPU×NPU×… + feel).
