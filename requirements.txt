@@ -13,3 +13,12 @@ pin>=3.9.0           # pinocchio (cinemática); puxado pelo __init__ do pacote
 # O front (React+Tailwind) fica em web/ e precisa de Node/npm: npm install && npm run build
 fastapi>=0.110            # servidor web (rotas /video, /ws, serve o build do React)
 uvicorn[standard]>=0.29   # ASGI server (roda o FastAPI numa thread daemon)
+
+# Percepção avançada (PLANO_CRIATURA: corpo/mãos/identidade/emoção). Validado convivendo
+# com o braço (numpy 2.4.6). ATENÇÃO: NÃO instalar 'onnxruntime' puro — usar SÓ o
+# 'onnxruntime-openvino' (provê o OpenVINO EP, ~3.5x no CPU); os dois conflitam.
+mediapipe==0.10.35           # pose (corpo) + hands (mãos) + face mesh (expressão)
+insightface==1.0.1           # detecção (RetinaFace/SCRFD) + ArcFace (identidade) + idade/gênero
+onnxruntime-openvino==1.24.1 # runtime ONNX com OpenVINO EP (CPU/iGPU/NPU)
+openvino==2026.2.1           # runtime OpenVINO (lista dispositivos)
+hsemotion-onnx==0.3.1        # emoção rotulada (8 classes), ONNX
