@@ -34,6 +34,10 @@ CAMERA = "C920"
 MODELO_URL = ("https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
               "pose_landmarker_lite/float16/latest/pose_landmarker_lite.task")
 CONEXOES = vision.PoseLandmarksConnections.POSE_LANDMARKS
+HAND_CONN = vision.HandLandmarksConnections.HAND_CONNECTIONS
+MODELO_MAOS_URL = ("https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
+                   "hand_landmarker/float16/latest/hand_landmarker.task")
+PONTAS, PIPS = [4, 8, 12, 16, 20], [3, 6, 10, 14, 18]   # pontas e juntas dos dedos
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "config_seguir_ik.json")
 DUR_ACORDAR, DUR_REPOUSO = 3.0, 3.5
@@ -56,6 +60,26 @@ def desenha(frame, lms, w, h):
     for i, p in enumerate(lms):
         if p.visibility >= VIS_MIN:
             cv2.circle(frame, pts[i], 3, (255, 200, 0), -1)
+
+
+def desenha_maos(frame, maos, w, h):
+    for hand in maos:
+        pts = [(int(p.x * w), int(p.y * h)) for p in hand]
+        for c in HAND_CONN:
+            cv2.line(frame, pts[c.start], pts[c.end], (0, 180, 255), 2)
+        for p in pts:
+            cv2.circle(frame, p, 3, (0, 90, 255), -1)
+
+
+def conta_dedos(lms):
+    """Conta dedos levantados (heurística simples pelos landmarks da mão)."""
+    n = 0
+    for tip, pip in zip(PONTAS[1:], PIPS[1:]):     # 4 dedos: ponta acima da junta
+        if lms[tip].y < lms[pip].y - 0.02:
+            n += 1
+    if abs(lms[4].x - lms[0].x) > abs(lms[3].x - lms[0].x) * 1.1:   # polegar afastado
+        n += 1
+    return n
 
 
 def analisa(lms, w, h):
@@ -179,6 +203,12 @@ def main():
         running_mode=vision.RunningMode.VIDEO, num_poses=1)
     landmarker = vision.PoseLandmarker.create_from_options(opt)
 
+    # ---- modelo de mãos (21 pts/mão, até 2 mãos) ----
+    modelo_m = baixar_modelo(MODELO_MAOS_URL, "hand_landmarker.task")
+    hand_lm = vision.HandLandmarker.create_from_options(vision.HandLandmarkerOptions(
+        base_options=mp_python.BaseOptions(model_asset_path=modelo_m),
+        running_mode=vision.RunningMode.VIDEO, num_hands=2))
+
     med = Medidor()
     reg = Registro("pose")
     reg.linha(tipo="inicio", lab="pose", camera=CAMERA, modelo=os.path.basename(modelo))
@@ -194,14 +224,25 @@ def main():
             h, w = frame.shape[:2]
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+            ts = int((time.time() - t0) * 1000)
             with med.estagio("pose"):
-                res = landmarker.detect_for_video(mp_img, int((time.time() - t0) * 1000))
+                res = landmarker.detect_for_video(mp_img, ts)
+            with med.estagio("maos"):
+                res_m = hand_lm.detect_for_video(mp_img, ts)
 
             modo = "FLUTUANDO (posicione com a mao)" if est["livre"] else "TRAVADO"
-            linhas = [(f"FPS {med.fps():.0f}   pose {med.media_ms('pose'):.0f} ms   {w}x{h}",
-                       (0, 255, 180)),
+            linhas = [(f"FPS {med.fps():.0f}   pose {med.media_ms('pose'):.0f}ms  "
+                       f"maos {med.media_ms('maos'):.0f}ms   {w}x{h}", (0, 255, 180)),
                       (f"{modo}   [ESPACO trava | f flutua | ESC pousa+sai]",
                        (120, 200, 255) if est["livre"] else (120, 235, 120))]
+            # mãos: desenha + conta dedos + handedness (esq/dir)
+            dedos, lados = [], []
+            if res_m.hand_landmarks:
+                desenha_maos(frame, res_m.hand_landmarks, w, h)
+                dedos = [conta_dedos(hd) for hd in res_m.hand_landmarks]
+                lados = [c[0].category_name for c in res_m.handedness] if res_m.handedness else []
+            linhas.append((f"maos: {len(dedos)}  dedos levantados: {dedos}  {lados}",
+                           (0, 200, 255) if dedos else (130, 130, 130)))
             info = {}
             if res.pose_landmarks:
                 lms = res.pose_landmarks[0]
@@ -221,11 +262,13 @@ def main():
             # ---- log JSONL: snapshot a ~2 Hz + sempre que muda um sinal-chave ----
             corpo = bool(res.pose_landmarks)
             sig = (corpo, info.get("postura"), info.get("dist"),
-                   info.get("olhar"), info.get("virado"))
+                   info.get("olhar"), info.get("virado"), tuple(dedos))
             agora = time.time()
             if sig != sig_prev or agora - t_log > 0.5:
                 reg.linha(fps=round(med.fps(), 1), pose_ms=round(med.media_ms("pose"), 1),
-                          corpo=corpo, livre=bool(est["livre"]), **info)
+                          maos_ms=round(med.media_ms("maos"), 1), corpo=corpo,
+                          maos=len(dedos), dedos=dedos, lados=lados,
+                          livre=bool(est["livre"]), **info)
                 t_log, sig_prev = agora, sig
 
             hud(frame, linhas)
