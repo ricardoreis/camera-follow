@@ -23,6 +23,10 @@ logs_ik/
 web/node_modules/
 web/dist/
 
+# Labs de visão (venv separado do braço + modelos baixados)
+.venv-labs/
+models_labs/
+
 # Editores / SO
 .vscode/
 .idea/
