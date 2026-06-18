@@ -44,6 +44,21 @@ def make_providers(dispositivo):
     return ["CPUExecutionProvider"]
 
 
+def aviso_dispositivo(dispositivo):
+    """Avisa (claramente) se o dispositivo OpenVINO pedido não existe → cai no CPU."""
+    alvo = {"ovcpu": "CPU", "gpu": "GPU", "npu": "NPU"}.get(dispositivo.lower())
+    if not alvo:
+        return
+    try:
+        import openvino as ov
+        devs = ov.Core().available_devices
+        if alvo not in devs:
+            print(f"!!! OpenVINO NAO ve '{alvo}' (so enxerga {devs}) -> vai cair no CPU "
+                  f"(sem ganho). Pra liberar iGPU/NPU faltam drivers Intel no Linux.")
+    except Exception:
+        pass
+
+
 def carregar_db():
     if not os.path.exists(DB_PATH):
         return []

@@ -59,6 +59,22 @@ acerto), **facilidade de setup**. Saída: uma tabela por capacidade → decisão
   aí sim uma **GPU dedicada** (eGPU/desktop) daria salto — os números dirão se compensa.
 - Serviço pago por API: só se for **muito** melhor que o melhor local (raro nesses casos).
 
+## Resultados medidos (Zenbook S14 / Intel 258V)
+
+**Lab 2 — identidade (InsightFace buffalo_s, det 480, 1 rosto):**
+| dispositivo | latência/face | fps | obs |
+|---|---|---|---|
+| `cpu` (onnxruntime CPU) | ~32 ms | ~21 | baseline |
+| `ovcpu` (OpenVINO **CPU**) | **~9 ms** | **~30** | **~3,5× mais rápido — sem GPU!** |
+| `gpu` / `npu` | ~32 ms | ~21 | **cai no CPU**: faltam drivers Intel no Linux |
+
+**Conclusões:** (1) só trocar pro **OpenVINO-CPU** já dá ~3,5× → 30fps na identidade, **de
+graça** (nenhum hardware novo). (2) iGPU/NPU exigem drivers de sistema (sudo/reboot) que
+ainda não estão instalados — por isso `gpu`/`npu` caíram no CPU. (3) Como o `ovcpu` já
+satura a câmera (30fps) p/ identidade, **GPU/NPU só compensam** se empilharmos modelos
+pesados (buffalo_l, emoção, vários ao mesmo tempo) — os próximos labs dirão.
+`buffalo_l` (preciso) ~600ms/rosto em CPU = 2fps → use só async/baixa freq, ou OpenVINO.
+
 ## Arquitetura (para a futura integração na app)
 O loop de tracking é rápido (cada frame). Modelos pesados (identidade/emoção) rodam
 **assíncronos, em baixa frequência** (~1–2×/s, thread separada), anotando o rosto já
