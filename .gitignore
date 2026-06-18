@@ -23,9 +23,10 @@ logs_ik/
 web/node_modules/
 web/dist/
 
-# Labs de visão (venv separado do braço + modelos baixados)
+# Labs de visão (venv separado do braço + modelos baixados + logs)
 .venv-labs/
 models_labs/
+logs_labs/
 
 # Editores / SO
 .vscode/

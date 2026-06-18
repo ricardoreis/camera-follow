@@ -28,7 +28,7 @@ sys.path.insert(0, ARM_REPO)
 from reBotArm_control_py.actuator import RobotArm  # noqa: E402
 from controle_braco import est, controlador, motor_pronto, KP, KD  # noqa: E402
 import camera
-from lab_bench import Medidor, hud, baixar_modelo
+from lab_bench import Medidor, hud, baixar_modelo, Registro
 
 CAMERA = "C920"
 MODELO_URL = ("https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
@@ -39,6 +39,7 @@ CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 DUR_ACORDAR, DUR_REPOUSO = 3.0, 3.5
 
 NARIZ, OMB_E, OMB_D = 0, 11, 12
+OLHO_E, OLHO_D, OREL_E, OREL_D = 2, 5, 7, 8
 QUAD_E, QUAD_D, JOE_E, JOE_D = 23, 24, 25, 26
 VIS_MIN = 0.5
 
@@ -74,6 +75,17 @@ def analisa(lms, w, h):
             break
     else:
         info["postura"] = "? (pernas fora do quadro)"
+    # ---- orientação da cabeça (APROX. — a precisa, em graus, vem do Face Landmarker) ----
+    if all(vis(lms, i) for i in (OLHO_E, OLHO_D, OREL_E, OREL_D)):
+        escala = abs(lms[OREL_E].x - lms[OREL_D].x) + 1e-3   # ~largura da cabeça (normaliza)
+        eye_y = (lms[OLHO_E].y + lms[OLHO_D].y) / 2
+        ear_y = (lms[OREL_E].y + lms[OREL_D].y) / 2
+        pitch = (eye_y - ear_y) / escala        # olhos ABAIXO das orelhas → olhando p/ baixo
+        info["olhar"] = "BAIXO" if pitch > 0.15 else "CIMA" if pitch < -0.18 else "frente"
+        info["pitch"] = round(float(pitch), 2)
+        # roll: inclinação da linha dos olhos (cabeça pro ombro)
+        info["roll"] = round(float(np.degrees(np.arctan2(
+            lms[OLHO_D].y - lms[OLHO_E].y, lms[OLHO_D].x - lms[OLHO_E].x))), 0)
     return info
 
 
@@ -168,7 +180,11 @@ def main():
     landmarker = vision.PoseLandmarker.create_from_options(opt)
 
     med = Medidor()
+    reg = Registro("pose")
+    reg.linha(tipo="inicio", lab="pose", camera=CAMERA, modelo=os.path.basename(modelo))
     t0 = time.time()
+    t_log = 0.0          # throttle do snapshot periódico
+    sig_prev = None      # p/ logar transições (corpo/postura/distância)
     try:
         while True:
             ok, frame = cap.read()
@@ -186,6 +202,7 @@ def main():
                        (0, 255, 180)),
                       (f"{modo}   [ESPACO trava | f flutua | ESC pousa+sai]",
                        (120, 200, 255) if est["livre"] else (120, 235, 120))]
+            info = {}
             if res.pose_landmarks:
                 lms = res.pose_landmarks[0]
                 desenha(frame, lms, w, h)
@@ -195,10 +212,21 @@ def main():
                     (f"postura: {info.get('postura', '?')}", (235, 225, 130)),
                     (f"distancia: {info.get('dist', '?')}  (ombros {info.get('ombros_px', 0):.0f}px)",
                      (235, 225, 130)),
-                    (f"virado p/: {info.get('virado', '?')}", (235, 225, 130)),
+                    (f"olhar: {info.get('olhar', '?')}  virado: {info.get('virado', '?')}  "
+                     f"roll: {info.get('roll', 0):.0f}deg", (235, 225, 130)),
                 ]
             else:
                 linhas.append(("nenhum corpo no quadro", (120, 120, 245)))
+
+            # ---- log JSONL: snapshot a ~2 Hz + sempre que muda um sinal-chave ----
+            corpo = bool(res.pose_landmarks)
+            sig = (corpo, info.get("postura"), info.get("dist"),
+                   info.get("olhar"), info.get("virado"))
+            agora = time.time()
+            if sig != sig_prev or agora - t_log > 0.5:
+                reg.linha(fps=round(med.fps(), 1), pose_ms=round(med.media_ms("pose"), 1),
+                          corpo=corpo, livre=bool(est["livre"]), **info)
+                t_log, sig_prev = agora, sig
 
             hud(frame, linhas)
             cv2.imshow(janela, frame)
@@ -222,6 +250,7 @@ def main():
                 pass
         cap.release()
         cv2.destroyAllWindows()
+        reg.fim(resumo=med.resumo())
         print("--- resumo:", med.resumo(), "---")
 
 

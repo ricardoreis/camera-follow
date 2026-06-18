@@ -14,6 +14,7 @@ Sem dependências do braço: só cv2/numpy/time. Uso:
 """
 
 import collections
+import json
 import os
 import time
 import urllib.request
@@ -21,6 +22,28 @@ import urllib.request
 import cv2
 
 MODELOS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models_labs")
+LOGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs_labs")
+
+
+class Registro:
+    """Log JSONL simples (1 linha = 1 dict) p/ salvar os sinais dos labs e reusar depois.
+    Cada linha ganha um 't' (timestamp). Uso: reg.linha(...); reg.fim(resumo=...)."""
+
+    def __init__(self, nome):
+        os.makedirs(LOGS_DIR, exist_ok=True)
+        self.caminho = os.path.join(LOGS_DIR, nome + "_" + time.strftime("%Y%m%d_%H%M%S") + ".jsonl")
+        self.f = open(self.caminho, "w")
+        print(f"--- log: {self.caminho} ---")
+
+    def linha(self, **kw):
+        kw.setdefault("t", round(time.time(), 3))
+        self.f.write(json.dumps(kw, ensure_ascii=False) + "\n")
+        self.f.flush()
+
+    def fim(self, **kw):
+        self.linha(tipo="fim", **kw)
+        self.f.close()
+        print(f"--- log salvo: {self.caminho} ---")
 
 
 def baixar_modelo(url, nome):
